@@ -26,116 +26,226 @@
 
 <body>
 
-    <nav class="container"
-        style="padding-top: 2rem; display: flex; justify-content: space-between; align-items: center;">
-        <div
-            style="display: flex; align-items: center; gap: 0.5rem; font-family: var(--font-heading); font-weight: 700; font-size: 1.25rem;">
-            <img src="./assets/delta_icon.png" alt="Icon" width="32" style="border-radius: 50%;">
-            <span>ΔMEM</span>
+    <!-- Navigation -->
+    <nav style="position: absolute; top: 0; left: 0; width: 100%; z-index: 10; padding: 2rem 0;">
+        <div class="container" style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <img src="./assets/delta_icon.png" alt="Delta" width="40"
+                    style="border-radius: 50%; border: 2px solid rgba(255,255,255,0.1);">
+                <span style="font-weight: 700; font-size: 1.25rem;">ΔMEM</span>
+            </div>
+            <div style="display: flex; gap: 2rem; align-items: center;">
+                <a href="#architecture"
+                    style="color: var(--text-zinc-400); text-decoration: none; font-size: 0.95rem;">Structure</a>
+                <a href="#use-cases"
+                    style="color: var(--text-zinc-400); text-decoration: none; font-size: 0.95rem;">Uses</a>
+                <a href="https://github.com/deviprasad/buddi" target="_blank" class="btn-outline"
+                    style="padding: 0.5rem 1rem; border-radius: var(--radius-md); text-decoration: none; font-size: 0.9rem;">
+                    GitHub
+                </a>
+            </div>
         </div>
-        <a href="https://github.com/deviprasad/buddi" target="_blank"
-            style="color: var(--text-silver); text-decoration: none;">GitHub -></a>
     </nav>
 
-    <main class="hero container">
-        <div class="hero-content">
-            <div>
+    <!-- Hero -->
+    <main class="hero">
+        <div class="container hero-grid">
+            <div style="z-index: 2;">
                 <div
-                    style="font-family: var(--font-mono); color: var(--primary-cyan); margin-bottom: 1rem; font-size: 0.9rem;">
-                    v1.0.0 • MCP READY
+                    style="display: inline-block; padding: 0.5rem 1rem; background: rgba(34, 211, 238, 0.1); border: 1px solid rgba(34, 211, 238, 0.2); border-radius: 100px; color: var(--primary-cyan); font-family: var(--font-mono); font-size: 0.85rem; margin-bottom: 2rem;">
+                    v1.0.0 • AGENTIC MEMORY PROTOCOL
                 </div>
-                <h1 style="font-size: 3.5rem; margin-bottom: 1.5rem; line-height: 1.1;">
-                    Memory for Agents,<br>
-                    <span class="gradient-text">Not Just Vectors.</span>
+                <h1 class="display-text" style="margin-bottom: 2rem;">
+                    Memory that <br>
+                    <span style="color: var(--primary-cyan);">Actually Evolves.</span>
                 </h1>
-                <p style="color: var(--text-silver); font-size: 1.2rem; margin-bottom: 2.5rem; max-width: 500px;">
-                    Give your LLM a reliable, evolving long-term memory. Deterministic resolution, event-sourced
-                    history, and zero hallucinations.
+                <p style="font-size: 1.25rem; max-width: 600px; margin-bottom: 3rem; color: var(--text-zinc-400);">
+                    The first deterministic, event-sourced memory engine for AI agents.
+                    <strong>Deterministic Resolution</strong>. <strong>Append-Only Log</strong>.
+                    <span style="color: var(--text-zinc-200);">Pure Python.</span>
                 </p>
-                <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
-                    <a href="#install" class="btn">
-                        Get Started <i data-lucide="arrow-right"></i>
-                    </a>
-                    <button class="btn"
-                        style="background: transparent; border: 1px solid var(--bg-zinc-800); color: var(--text-white);"
-                        onclick="copyInstall()">
-                        <i data-lucide="github"></i> git clone ...
+                <div style="display: flex; gap: 1.5rem; flex-wrap: wrap;">
+                    <button class="btn btn-primary" onclick="window.location.href='#install'">
+                        Start Integration <i data-lucide="arrow-right"></i>
+                    </button>
+                    <button class="btn btn-outline" onclick="copyInstall()">
+                        <i data-lucide="terminal-square"></i> git clone ...
                     </button>
                 </div>
             </div>
 
-            <div style="display: flex; justify-content: center; position: relative;">
-                <div
-                    style="position: absolute; width: 400px; height: 400px; background: var(--primary-cyan); opacity: 0.1; filter: blur(100px); z-index: 1;">
+            <div class="hero-visual">
+                <div class="orb"></div>
+                <!-- Glassmorphism Card Floating -->
+                <div class="float"
+                    style="position: relative; z-index: 3; background: rgba(20, 20, 25, 0.6); backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.1); padding: 2rem; border-radius: 24px; width: 100%; max-width: 400px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);">
+                    <div
+                        style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 1rem;">
+                        <img src="./assets/delta_icon.png" width="48" style="border-radius: 50%;">
+                        <div>
+                            <div style="font-weight: 700; font-size: 1.1rem;">Delta Agent</div>
+                            <div style="font-size: 0.85rem; color: var(--primary-cyan);">● Online</div>
+                        </div>
+                    </div>
+                    <div
+                        style="font-family: var(--font-mono); font-size: 0.9rem; color: var(--text-zinc-200); line-height: 1.8;">
+                        <span style="color: var(--text-zinc-400);">&gt;</span> ingest_fact("User prefers dark mode")<br>
+                        <span style="color: var(--primary-cyan);">✓ Atom #8821 indexed.</span><br>
+                        <span style="color: var(--text-zinc-400);">&gt;</span> compile_context()<br>
+                        <span style="color: var(--text-zinc-200);">Context: { "theme": "dark" }</span>
+                    </div>
                 </div>
-                <img src="./assets/delta_icon.png" alt="Delta Mascot" class="float-anim" width="400"
-                    style="z-index: 2; border-radius: 50%; border: 4px solid rgba(6,182,212,0.2);">
             </div>
         </div>
     </main>
 
-    <section class="container" style="padding-bottom: 6rem;">
-        <h2 style="text-align: center; margin-bottom: 3rem; font-size: 2.5rem;">Why <span
-                class="glow-text">Delta</span>?</h2>
+    <!-- Use Cases (Grid Breaker) -->
+    <section id="use-cases" class="section container">
+        <h2 class="section-title">Unlock <span style="color: var(--primary-cyan);">True Potential</span></h2>
 
-        <div class="features-grid">
-            <div class="card">
-                <i data-lucide="brain-circuit" color="var(--primary-cyan)" size="32" style="margin-bottom: 1.5rem;"></i>
-                <h3 style="font-size: 1.5rem; margin-bottom: 1rem;">Zero Hallucinations</h3>
-                <p style="color: var(--text-silver);">Uses a topological resolution graph to determine state
-                    deterministically. No fuzzy math for critical facts.</p>
+        <div class="bento-grid">
+            <div class="bento-item bento-large">
+                <i data-lucide="code-2" color="var(--primary-cyan)" size="32" style="margin-bottom: 1rem;"></i>
+                <h3>Agentic Coding</h3>
+                <p style="margin-top: 1rem;">Forget "context window limits". Delta acts as a permanent semantic cache
+                    for entire codebases. It remembers architectural decisions made 3 weeks ago, not just 3 minutes ago.
+                </p>
             </div>
-
-            <div class="card">
-                <i data-lucide="history" color="var(--primary-cyan)" size="32" style="margin-bottom: 1.5rem;"></i>
-                <h3 style="font-size: 1.5rem; margin-bottom: 1rem;">Time Travel</h3>
-                <p style="color: var(--text-silver);">Built on an append-only event log. Replay history, fork states, or
-                    roll back instantly.</p>
+            <div class="bento-item">
+                <i data-lucide="gamepad-2" color="#a1a1aa" size="32" style="margin-bottom: 1rem;"></i>
+                <h3>NPCs & Roleplay</h3>
+                <p style="margin-top: 1rem;">Characters that remember interactions forever. Create evolving narratives
+                    where every choice leaves a permanent trace in the state graph.</p>
             </div>
-
-            <div class="card">
-                <i data-lucide="zap" color="var(--primary-cyan)" size="32" style="margin-bottom: 1.5rem;"></i>
-                <h3 style="font-size: 1.5rem; margin-bottom: 1rem;">Bitwise Speed</h3>
-                <p style="color: var(--text-silver);">Custom Hamming distance acceleration for vector search. Sub-15ms
-                    retrieval latency.</p>
+            <div class="bento-item">
+                <i data-lucide="shield-check" color="#a1a1aa" size="32" style="margin-bottom: 1rem;"></i>
+                <h3>Audit & Compliance</h3>
+                <p style="margin-top: 1rem;">Every memory change is an event. Replay the entire history of how your AI
+                    formed a conclusion. 100% auditable.</p>
             </div>
-        </div>
-    </section>
-
-    <section id="install" class="container" style="padding-bottom: 8rem; display: grid; place-items: center;">
-        <div style="width: 100%; max-width: 800px;">
-            <div class="terminal">
-                <div class="terminal-header">
-                    <div class="dot" style="background:#ff5f56"></div>
-                    <div class="dot" style="background:#ffbd2e"></div>
-                    <div class="dot" style="background:#27c93f"></div>
-                </div>
-                <div style="line-height: 1.8;">
-                    <div class="cmd-line">$ git clone https://github.com/delta-mem/buddi</div>
-                    <div class="cmd-line">$ cd buddi</div>
-                    <div class="cmd-line">$ python server.py</div>
-                    <span class="cmd-output" style="color: var(--primary-cyan);">[INFO] ΔMEM Server listening on
-                        stdio...</span>
-                    <span class="cmd-output">✓ DeltaDB initialized (delta_mem.db)</span>
-                    <span class="cmd-output">✓ Vector Index warm (0 atoms)</span>
-                </div>
+            <div class="bento-item bento-large">
+                <i data-lucide="zap" color="var(--primary-cyan)" size="32" style="margin-bottom: 1rem;"></i>
+                <h3>Personal Assistants</h3>
+                <p style="margin-top: 1rem;">"Buddi" doesn't just chat; it learns. From dietary restrictions to
+                    preferred coding styles, Delta builds a high-fidelity user profile over time.</p>
             </div>
         </div>
     </section>
 
-    <footer
-        style="text-align: center; padding: 4rem 0; color: var(--text-silver); font-size: 0.9rem; border-top: 1px solid var(--bg-zinc-900);">
-        <p>Built with ❤️ for the Agentic Future.</p>
-        <p style="margin-top: 1rem; opacity: 0.5;">MIT License • Python 3.10+</p>
+    <!-- Architecture (Timeline) -->
+    <section id="architecture" class="section container"
+        style="display: grid; grid-template-columns: 1fr 1fr; gap: 4rem; align-items: start;">
+        <div>
+            <h2 class="section-title">How it Works</h2>
+            <p style="font-size: 1.1rem; margin-bottom: 2rem;">
+                Unlike simple Vector DBs, Delta uses a 4-stage pipeline to ensure <strong
+                    style="color: white;">Contextual Integrity</strong>.
+            </p>
+            <div class="timeline">
+                <div class="timeline-step">
+                    <h4 style="font-size: 1.25rem;">1. Ingestion</h4>
+                    <p>Raw text is converted into an Immutable Atom. We strip noise and verifying semantic density.</p>
+                </div>
+                <div class="timeline-step">
+                    <h4 style="font-size: 1.25rem;">2. Quantization</h4>
+                    <p>Embeddings are binarized. This allows us to use bitwise Hamming distance for searches, which is
+                        10x faster than cosine similarity.</p>
+                </div>
+                <div class="timeline-step">
+                    <h4 style="font-size: 1.25rem;">3. Delta Resolution</h4>
+                    <p>The magic sauce. We traverse the dependency graph to resolve conflicts (e.g., "I like red" -> "I
+                        actually like blue").</p>
+                </div>
+                <div class="timeline-step">
+                    <h4 style="font-size: 1.25rem;>4. Context Projection</h4>
+                    <p>The final state is projected into a clean JSON object for your LLM context window.</p>
+                </div>
+            </div>
+        </div>
+        <div style=" position: sticky; top: 100px;">
+                        <div
+                            style="background: var(--bg-zinc-900); padding: 2rem; border-radius: var(--radius-lg); border: 1px solid var(--bg-zinc-800);">
+                            <pre style="color: var(--text-zinc-400); font-family: var(--font-mono); overflow-x: auto;">
+ROOT:
+  User: "My project is 'Proxima'."
+
+DELTA_1 (ref: ROOT):
+  User: "Rename 'Proxima' to 'Orion'."
+
+DELTA_2 (ref: DELTA_1):
+  User: "Orion uses Rust."
+
+<span style="color: var(--primary-cyan);">► RESOLVED STATE:</span>
+{
+  "project_name": "Orion",
+  "language": "Rust"
+}
+</pre>
+                        </div>
+                </div>
+    </section>
+
+    <!-- Roadmap -->
+    <section class="section container">
+        <h2 class="section-title">Roadmap <span style="color: var(--text-zinc-400); font-size: 1.5rem;">(Coming
+                Next)</span></h2>
+        <div class="bento-grid">
+            <div class="bento-item">
+                <h4 style="margin-bottom: 0.5rem; color: var(--primary-cyan);">Time Travel API</h4>
+                <p>Request context from any point in the past. Rollback state instantly using the event log.</p>
+            </div>
+            <div class="bento-item">
+                <h4 style="margin-bottom: 0.5rem; color: var(--primary-cyan);">Multi-User Sync</h4>
+                <p>Support for collaborative agent swarms sharing a distributed memory scope.</p>
+            </div>
+            <div class="bento-item">
+                <h4 style="margin-bottom: 0.5rem; color: var(--primary-cyan);">Cloud Storage</h4>
+                <p>Optional S3/PGVector adapters for persisting atoms beyond the local file system.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- FAQ -->
+    <section class="section container">
+        <h2 class="section-title">FAQ</h2>
+        <div class="faq-grid">
+            <div class="faq-item">
+                <div class="faq-question">Cloud or Local?</div>
+                <p>100% Local. Your data lives in `delta_mem.db` on your machine. No API keys required.</p>
+            </div>
+            <div class="faq-item">
+                <div class="faq-question">Does it work with LangChain?</div>
+                <p>Yes, but you don't need it. Delta is a standalone MCP server. It works with Claude Desktop, Cursor,
+                    and any MCP client.</p>
+            </div>
+            <div class="faq-item">
+                <div class="faq-question">How fast is it?</div>
+                <p>Retrieval takes < 15ms on standard hardware thanks to numpy-optimized bitwise operations.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Installation Footer -->
+    <section id="install" class="section container" style="text-align: center; margin-top: 4rem;">
+        <h2 style="margin-bottom: 2rem;">Ready to upgrade your agent?</h2>
+        <div
+            style="background: var(--bg-zinc-900); display: inline-block; padding: 1.5rem 3rem; border-radius: var(--radius-lg); border: 1px solid var(--bg-zinc-800);">
+            <code
+                style="font-size: 1.2rem; color: var(--primary-cyan);">git clone https://github.com/deviprasad/buddi</code>
+        </div>
+        <p style="margin-top: 2rem; color: var(--text-zinc-400);">MIT Licensed • Open Source</p>
+    </section>
+
+    <footer style="padding: 4rem 0; text-align: center; border-top: 1px solid var(--bg-zinc-900); margin-top: 4rem;">
+        <p style="color: var(--text-zinc-400);">Built with ❤️ by the Delta Team.</p>
     </footer>
 
     <script src="script.js"></script>
     <script>
         lucide.createIcons();
-
         function copyInstall() {
             navigator.clipboard.writeText('git clone https://github.com/deviprasad/buddi');
-            alert('Clone command copied!');
+            alert('Clone command copied to clipboard!');
         }
     </script>
 </body>
