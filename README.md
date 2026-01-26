@@ -77,7 +77,7 @@ Add this to your MCP settings file (e.g., `%APPDATA%/Code/User/globalStorage/sao
   "mcpServers": {
     "delta-mem": {
       "command": "python",
-      "args": ["<ABSOLUTE_PATH_TO_REPO>/buddi/server.py"]
+      "args": ["<ABSOLUTE_PATH_TO_REPO>/delta/server.py"]
     }
   }
 }
