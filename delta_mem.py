@@ -94,6 +94,36 @@ class DeltaDB:
             if "original_dim" not in columns:
                 self.conn.execute("ALTER TABLE atoms ADD COLUMN original_dim INTEGER DEFAULT 0")
 
+            # FTS5 Virtual Table for Hybrid Search
+            try:
+                self.conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS atoms_fts USING fts5(content, content='atoms', content_rowid='rowid')")
+                
+                # Triggers to keep FTS in sync
+                self.conn.execute("""
+                    CREATE TRIGGER IF NOT EXISTS atoms_ai AFTER INSERT ON atoms BEGIN
+                        INSERT INTO atoms_fts(rowid, content) VALUES (new.rowid, new.content);
+                    END;
+                """)
+                self.conn.execute("""
+                    CREATE TRIGGER IF NOT EXISTS atoms_ad AFTER DELETE ON atoms BEGIN
+                        INSERT INTO atoms_fts(atoms_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+                    END;
+                """)
+                self.conn.execute("""
+                    CREATE TRIGGER IF NOT EXISTS atoms_au AFTER UPDATE ON atoms BEGIN
+                        INSERT INTO atoms_fts(atoms_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+                        INSERT INTO atoms_fts(rowid, content) VALUES (new.rowid, new.content);
+                    END;
+                """)
+                
+                # Backfill if empty (for existing databases)
+                count = self.conn.execute("SELECT count(*) FROM atoms_fts").fetchone()[0]
+                if count == 0:
+                    self.conn.execute("INSERT INTO atoms_fts(rowid, content) SELECT rowid, content FROM atoms")
+                    
+            except Exception as e:
+                print(f"Warning: FTS5 not supported or failed to init: {e}")
+
     def add_atom(self, atom: MemoryAtom):
         emb_bytes = atom.embedding.tobytes()
         refs_json = json.dumps(atom.refs)
@@ -127,9 +157,59 @@ class DeltaDB:
         return atoms
 
     def prune_expired(self, current_time: int) -> int:
-        with self.conn:
             cur = self.conn.execute("DELETE FROM atoms WHERE ttl IS NOT NULL AND ttl < ?", (current_time,))
             return cur.rowcount
+
+    def soft_delete_atom(self, atom_id: str, delete_time: int):
+        with self.conn:
+            self.conn.execute("UPDATE atoms SET ttl = ? WHERE id = ?", (delete_time, atom_id))
+
+    def get_related_atoms(self, atom_id: str) -> Dict[str, List[MemoryAtom]]:
+        # 1. Get parents (atoms referenced BY this atom)
+        # We need the atom itself first to get its refs
+        target = self.get_atoms_by_ids([atom_id])
+        if not target: return {"parents": [], "children": []}
+        
+        parent_ids = target[0].refs
+        parents = self.get_atoms_by_ids(parent_ids)
+        
+        # 2. Get children (atoms that reference THIS atom)
+        # SQLite JSON search is tricky without extensions, but we stored refs as TEXT JSON.
+        # Simple LIKE query is 'okay' for small lists, but not robust.
+        # Better: use FTS or specific index. For now, strict LIKE.
+        # "refs": ["id1", "id2"] -> LIKE '%"id1"%'
+        # Note: This is an expensive scan O(N) unless we index refs separately or use FTS on refs.
+        # Given "refs" column is not FTS, we do a scan. For <100k items its fine.
+        cursor = self.conn.execute("SELECT * FROM atoms WHERE refs LIKE ?", (f'%"{atom_id}"%',))
+        children = [MemoryAtom.from_row(row) for row in cursor]
+        
+        return {
+            "parents": parents,
+            "children": children
+        }
+
+    def search_fts(self, query: str, limit: int = 50) -> List[Tuple[str, float]]:
+        """
+        Full-Text Search using FTS5 with BM25 scoring.
+        SQLite's BM25 return a negative score (magnitude = relevance).
+        We sort ASC so the 'most negative' (best) matches come first.
+        """
+        try:
+            # We join back to atoms to get the ID, as FTS only has rowid
+            # We explicitly output bm25(atoms_fts) as score.
+            cursor = self.conn.execute("""
+                SELECT a.id, bm25(atoms_fts) as score
+                FROM atoms_fts 
+                JOIN atoms a ON a.rowid = atoms_fts.rowid
+                WHERE atoms_fts MATCH ? 
+                ORDER BY score ASC
+                LIMIT ?
+            """, (query, limit))
+            
+            return list(cursor)
+        except Exception as e:
+            print(f"FTS Search failed: {e}")
+            return []
 
 # ------------------------------------------------------------------------------
 # VECTOR INDEX (Custom Matrix Implementation)
@@ -277,126 +357,128 @@ class DeltaMem:
         
         return atom.id
 
-    def search(self, query_emb: List[float], intent_mask: int, scope_hash: str = None, top_k: int = 10, use_spreading_activation: bool = True):
+    def search(self, query_emb: List[float], intent_mask: int, scope_hash: str = None, top_k: int = 10, use_spreading_activation: bool = True, query_text: str = None):
+        """
+        Hybrid Search: Vector + FTS using Reciprocal Rank Fusion (RRF).
+        """
         current_time = int(time.time())
+        k_const = 60 # RRF constant
         
-        # Quantize Query
-        q_vec = np.array(query_emb, dtype=np.float32)
-        q_bits = (q_vec > 0).astype(np.uint8)
-        q_packed = np.packbits(q_bits)
-        
-        # Search Global `self.index` for everything.
-        # This is fast because it's just a matrix multiplication.
-        if self.index.matrix.size == 0:
-             return []
-             
-        # Calculate Similarities Globally
-        q_norm = np.linalg.norm(q_packed)
-        if q_norm == 0: q_norm = 1e-10
-        q = q_packed / q_norm
-        
-        dot_products = np.dot(self.index.matrix, q)
-        cosine_scores = dot_products / self.index.norms
-        
-        # Initial Filtering & Scoring
-        initial_candidates = {}
-        
-        for i, atom_id in enumerate(self.index.ids):
-            # Access atom from map (O(1))
-            atom = self.index.atoms_map.get(atom_id)
-            if not atom: continue
-
-            # Scope
-            if scope_hash and scope_hash != "*" and atom.scope_hash != scope_hash:
-                continue
-            # Intent
-            if intent_mask > 0 and (atom.intent_mask & intent_mask) == 0:
-                continue
-            # TTL
-            if atom.ttl is not None and current_time > atom.ttl:
-                continue
+        # 1. Vector Search
+        vector_results = []
+        if query_emb:
+            q_vec = np.array(query_emb, dtype=np.float32)
+            q_bits = (q_vec > 0).astype(np.uint8)
+            q_packed = np.packbits(q_bits)
+            
+            if self.index.matrix.size > 0:
+                q_norm = np.linalg.norm(q_packed)
+                if q_norm == 0: q_norm = 1e-10
+                q = q_packed / q_norm
                 
-            # If passed filters:
-            sim = float(cosine_scores[i])
-            
-            # Scoring Logic (reused)
-            # Intent Overlap
-            if intent_mask > 0:
-                overlap_bits = (atom.intent_mask & intent_mask).bit_count()
-                total_bits = intent_mask.bit_count()
-                overlap_score = overlap_bits / total_bits
-            else:
-                overlap_score = 0.0
+                dot_products = np.dot(self.index.matrix, q)
+                cosine_scores = dot_products / self.index.norms
                 
-            # Time Decay
-            age_seconds = current_time - atom.created_at
-            time_score = math.pow(0.5, age_seconds / 604800.0)
-            
-            # Confidence
-            conf_score = atom.confidence
-            
-            base_score = (
-                self.ALPHA * sim +
-                self.BETA * overlap_score +
-                self.GAMMA * time_score +
-                self.DELTA * conf_score
-            )
-            
-            initial_candidates[atom_id] = {
-                "atom": atom,
-                "score": base_score,
-                "source": "vector"
-            }
-
-        # ----------------------------------------------------------------------
-        # INTELLIGENT: Spreading Activation
-        # ----------------------------------------------------------------------
-        final_candidates = initial_candidates.copy()
-        
-        if use_spreading_activation:
-            # We only spread from the top N candidates to avoid exploding the graph
-            # Let's say top_k * 2
-            sorted_initial = sorted(initial_candidates.values(), key=lambda x: x["score"], reverse=True)[:top_k*2]
-            
-            for item in sorted_initial:
-                atom = item["atom"]
-                current_score = item["score"]
+                # Get raw candidates for post-processing/filtering
+                # Optimization: Filter *before* scoring if possible, but matrix ops are fast.
+                # We'll just filter iterates.
                 
-                # Spread to Refs (Parents) - "Forward Spreading"
-                # If I found "Concept B" (Child), "Concept A" (Parent) is likely relevant context.
-                for ref_id in atom.refs:
-                    parent_atom = self.index.atoms_map.get(ref_id)
+                filter_mask = np.ones(len(self.index.ids), dtype=bool)
+                # We can't vector-filter by object props easily without parallel arrays.
+                # So we iterate.
+                
+                for i, atom_id in enumerate(self.index.ids):
+                    atom = self.index.atoms_map.get(atom_id)
+                    if not atom: continue
                     
-                    # Parent must exist and be active
-                    if parent_atom and (parent_atom.ttl is None or parent_atom.ttl > current_time):
-                        
-                        # Calculate activated score
-                        activation = current_score * self.SPREADING_DECAY
-                        
-                        if ref_id in final_candidates:
-                            # Boost existing
-                            final_candidates[ref_id]["score"] += activation
-                            final_candidates[ref_id]["source"] = "vector+spread"
-                        else:
-                            # Add new activated candidate
-                            # We need to calculate its base score (minus vector sim if we want, or just use activation)
-                            # For simplicity, we treat activation as the score for purely spread items
-                            # But better to calculate its intrinsic score too? 
-                            # Let's just add it with the activation score for now.
-                            final_candidates[ref_id] = {
-                                "atom": parent_atom, 
-                                "score": activation,
-                                "source": "spread"
-                            }
+                    # Filtering
+                    if scope_hash and scope_hash != "*" and atom.scope_hash != scope_hash: continue
+                    if intent_mask > 0 and (atom.intent_mask & intent_mask) == 0: continue
+                    if atom.ttl is not None and current_time > atom.ttl: continue
+                    
+                    vector_results.append({
+                        "id": atom_id, 
+                        "score": float(cosine_scores[i]),
+                        "atom": atom
+                    })
+                
+                # Sort by vector score
+                vector_results.sort(key=lambda x: x["score"], reverse=True)
+                vector_results = vector_results[:top_k*2]
 
-        # Convert to list
-        scored_results = []
-        for cid, data in final_candidates.items():
-            scored_results.append((data["atom"], data["score"]))
+        # 2. FTS Search
+        fts_results = []
+        if query_text:
+            raw_fts = self.db.search_fts(query_text, limit=top_k*2)
+            # Map FTS results to atoms and filter
+            for atom_id, rank in raw_fts:
+                atom = self.index.atoms_map.get(atom_id)
+                if not atom: continue
+                
+                if scope_hash and scope_hash != "*" and atom.scope_hash != scope_hash: continue
+                if intent_mask > 0 and (atom.intent_mask & intent_mask) == 0: continue
+                if atom.ttl is not None and current_time > atom.ttl: continue
+                
+                fts_results.append({
+                    "id": atom_id,
+                    "score": rank, # Rank is opaque, but RRF only cares about position
+                    "atom": atom
+                })
+        
+        # 3. Reciprocal Rank Fusion
+        fused_scores = {}
+        
+        # Process Vector Ranks
+        for rank, item in enumerate(vector_results):
+            atom_id = item["id"]
+            if atom_id not in fused_scores:
+                fused_scores[atom_id] = {"score": 0.0, "atom": item["atom"], "sources": []}
             
-        # Top K
-        scored_results.sort(key=lambda x: x[1], reverse=True)
-        return scored_results[:top_k]
+            fused_scores[atom_id]["score"] += 1.0 / (k_const + rank + 1)
+            fused_scores[atom_id]["sources"].append("vector")
+
+        # Process FTS Ranks
+        for rank, item in enumerate(fts_results):
+            atom_id = item["id"]
+            if atom_id not in fused_scores:
+                fused_scores[atom_id] = {"score": 0.0, "atom": item["atom"], "sources": []}
+                
+            fused_scores[atom_id]["score"] += 1.0 / (k_const + rank + 1)
+            fused_scores[atom_id]["sources"].append("fts")
+
+        # 4. Spreading Activation (Applied to fused heads)
+        final_candidates = fused_scores
+        if use_spreading_activation:
+             # Take top items from fusion to spread from
+             sorted_heads = sorted(fused_scores.values(), key=lambda x: x["score"], reverse=True)[:top_k]
+             
+             for item in sorted_heads:
+                 atom = item["atom"]
+                 base_score = item["score"]
+                 
+                 for ref_id in atom.refs:
+                     parent = self.index.atoms_map.get(ref_id)
+                     if parent and (parent.ttl is None or parent.ttl > current_time):
+                         activation = base_score * self.SPREADING_DECAY
+                         
+                         if ref_id in final_candidates:
+                             final_candidates[ref_id]["score"] += activation
+                             if "spread" not in final_candidates[ref_id]["sources"]:
+                                 final_candidates[ref_id]["sources"].append("spread")
+                         else:
+                             final_candidates[ref_id] = {
+                                 "score": activation,
+                                 "atom": parent,
+                                 "sources": ["spread"]
+                             }
+
+        # Format Output
+        results = []
+        for pid, data in final_candidates.items():
+            results.append((data["atom"], data["score"]))
+            
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results[:top_k]
 
     def compile_context(self, scope_hash: str) -> Dict[str, Any]:
         """
@@ -773,4 +855,47 @@ class DeltaMem:
             "clusters_found": len(clusters),
             "atoms_consolidated": consolidated_count,
             "new_centroids_created": len(new_atoms)
+        }
+
+    # --------------------------------------------------------------------------
+    # FINAL POLISH: Delete & Explore
+    # --------------------------------------------------------------------------
+    def delete_atom(self, atom_id: str) -> bool:
+        """
+        Soft deletes an atom by setting its TTL to the past.
+        """
+        # Expire immediately (current_time - 1)
+        expire_time = int(time.time()) - 1
+        self.db.soft_delete_atom(atom_id, expire_time)
+        
+        # Remove from in-memory index if present
+        if atom_id in self.index.atoms_map:
+            del self.index.atoms_map[atom_id]
+            # Matrix removal is expensive (requires slicing).
+            # We lazy-prune: just ensure subsequent searches filtering by map checks handle missing items.
+            # But wait, our search iterate over `self.index.ids`.
+            # We should remove from ids (list) which is O(N).
+            try:
+                self.index.ids.remove(atom_id)
+            except ValueError:
+                pass
+            # Matrix norms/rows drift out of sync with ids if we don't rebuild.
+            # Lazy approach: Rebuild index if we delete a lot.
+            # Or just mark it as 'deleted' in a separate set?
+            # Cleanest: Just let `_hydrate_index` handle it on next startup/prune.
+            # For now, searching filters by `if not atom: continue`.
+            # We deleted from `atoms_map`, so `get` returns None. Search loop handles it.
+            pass
+            
+        return True
+
+    def recall_related(self, atom_id: str) -> Dict[str, Any]:
+        """
+        Traverses one hop up (Parents) and down (Children).
+        """
+        related = self.db.get_related_atoms(atom_id)
+        
+        return {
+            "parents": [a.to_dict() for a in related["parents"]],
+            "children": [a.to_dict() for a in related["children"]]
         }

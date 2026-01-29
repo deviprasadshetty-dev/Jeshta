@@ -27,7 +27,11 @@ class MCPServer:
             "compact_scope": self.compact_scope,
             "prune_expired_atoms": self.prune_expired_atoms,
             "verify_integrity": self.verify_integrity,
-            "consolidate_memory": self.consolidate_memory
+            "prune_expired_atoms": self.prune_expired_atoms,
+            "verify_integrity": self.verify_integrity,
+            "consolidate_memory": self.consolidate_memory,
+            "delete_atom": self.delete_atom,
+            "recall_related": self.recall_related
         }
         
         # Initialize Embedder (Optional)
@@ -92,7 +96,8 @@ class MCPServer:
             intent_mask=args["intent_mask"],
             scope_hash=args.get("scope_hash", self.default_scope),
             top_k=args.get("top_k", 10),
-            use_spreading_activation=args.get("use_spreading_activation", True)
+            use_spreading_activation=args.get("use_spreading_activation", True),
+            query_text=args.get("query") # Pass raw query for FTS
         )
         # Format results: list of {atom: ..., score: ...}
         # But atom needs to be serializable
@@ -129,6 +134,17 @@ class MCPServer:
             scope_hash=scope,
             similarity_threshold=args.get("similarity_threshold", 0.95)
         )
+
+    def delete_atom(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        if "atom_id" not in args:
+             raise ValueError("Missing field: atom_id")
+        success = self.mem.delete_atom(args["atom_id"])
+        return {"success": success, "id": args["atom_id"]}
+
+    def recall_related(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        if "atom_id" not in args:
+             raise ValueError("Missing field: atom_id")
+        return self.mem.recall_related(args["atom_id"])
 
     def run(self):
         # Read from stdin line by line
@@ -271,6 +287,28 @@ class MCPServer:
                                     "similarity_threshold": {"type": "number"}
                                 },
                                 "required": []
+                            }
+                        },
+                        {
+                            "name": "delete_atom",
+                            "description": "Delete (forget) a specific atom",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "atom_id": {"type": "string"}
+                                },
+                                "required": ["atom_id"]
+                            }
+                        },
+                        {
+                            "name": "recall_related",
+                            "description": "Explore causal relationships (why/what)",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "atom_id": {"type": "string"}
+                                },
+                                "required": ["atom_id"]
                             }
                         }
                     ]
