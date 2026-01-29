@@ -12,20 +12,20 @@ You have access to a persistent, event-sourced memory engine called **ΔMEM**. Y
 
 ### 1. Initialization (Start of Session)
 At the start of every new task or session, you **MUST** check for improved context.
-*   **Action**: Call `compile_context(scope_hash="<project_name>")`.
+*   **Action**: Call `compile_context()`.
 *   **Goal**: Retrieve `stable_facts` and `recent_deltas` to understand the project status, user preferences, and active constraints.
+*   **Note**: The server automatically detects the scope from the workspace. Only provide `scope_hash` if you need to access a *different* project's memory.
 
 ### 2. Learning (During Session)
 When the user defines a new rule, preference, or architectural decision:
 *   **Action**: Call `add_atom`.
     *   `content`: Concise description of the fact.
-    *   `scope_hash`: The project identifier (or "global" for user preferences).
     *   `intent_mask`: 1 (Fact), 2 (Delta/Change), 4 (Constraint).
     *   `embedding`: Use a zero-vector `[0.0]*dim` if you cannot generate embeddings, or request the user to handle it. (Note: Server handles quantization).
 
 ### 3. Recall (Before Answering Complex Questions)
 If the user asks about a specific topic (e.g., "Why did we choose SQLite?"):
-*   **Action**: Call `search_atoms(query_emb=..., scope_hash="...")`.
+*   **Action**: Call `search_atoms(query_emb=...)`.
 
 ### 4. Evolution (State Change)
 If a decision changes (e.g., "Switch from Python to Rust"):

@@ -14,6 +14,11 @@ class MCPServer:
         # Force DB to be in the same directory as this script
         db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "delta_mem.db")
         self.mem = DeltaMem(db_path)
+        
+        # Auto-detect default scope from current working directory
+        self.default_scope = os.path.basename(os.getcwd())
+        logging.info(f"Default scope set to: {self.default_scope}")
+
         self.tools = {
             "add_atom": self.add_atom,
             "search_atoms": self.search_atoms,
@@ -42,10 +47,12 @@ class MCPServer:
     def add_atom(self, args: Dict[str, Any]) -> str:
         # Args: content, embedding, intent_mask, scope_hash, refs?, ttl?, confidence?
         # Validation
-        req_fields = ["content", "intent_mask", "scope_hash"]
+        req_fields = ["content", "intent_mask"]
         for f in req_fields:
             if f not in args:
                 raise ValueError(f"Missing field: {f}")
+        
+        scope = args.get("scope_hash", self.default_scope)
         
         embedding = args.get("embedding")
         if embedding is None:
@@ -60,7 +67,7 @@ class MCPServer:
             content=args["content"],
             embedding=embedding,
             intent_mask=args["intent_mask"],
-            scope_hash=args["scope_hash"],
+            scope_hash=scope,
             refs=args.get("refs"),
             ttl=args.get("ttl"),
             confidence=args.get("confidence", 1.0)
@@ -83,7 +90,7 @@ class MCPServer:
         results = self.mem.search(
             query_emb=args["embedding"],
             intent_mask=args["intent_mask"],
-            scope_hash=args.get("scope_hash"),
+            scope_hash=args.get("scope_hash", self.default_scope),
             top_k=args.get("top_k", 10),
             use_spreading_activation=args.get("use_spreading_activation", True)
         )
@@ -97,9 +104,8 @@ class MCPServer:
         return out
 
     def compile_context(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        if "scope_hash" not in args:
-             raise ValueError("Missing field: scope_hash")
-        return self.mem.compile_context(args["scope_hash"])
+        scope = args.get("scope_hash", self.default_scope)
+        return self.mem.compile_context(scope)
 
     def diff_memory(self, args: Dict[str, Any]) -> Any:
         if "id_a" not in args or "id_b" not in args:
@@ -107,23 +113,20 @@ class MCPServer:
         return self.mem.diff_memory(args["id_a"], args["id_b"])
 
     def compact_scope(self, args: Dict[str, Any]) -> Dict[str, int]:
-        if "scope_hash" not in args:
-             raise ValueError("Missing field: scope_hash")
-        return self.mem.compact_scope(args["scope_hash"])
+        scope = args.get("scope_hash", self.default_scope)
+        return self.mem.compact_scope(scope)
 
     def prune_expired_atoms(self, args: Dict[str, Any]) -> int:
         return self.mem.prune()
 
     def verify_integrity(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        if "scope_hash" not in args:
-             raise ValueError("Missing field: scope_hash")
-        return self.mem.verify_integrity(args["scope_hash"])
+        scope = args.get("scope_hash", self.default_scope)
+        return self.mem.verify_integrity(scope)
 
     def consolidate_memory(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        if "scope_hash" not in args:
-             raise ValueError("Missing field: scope_hash")
+        scope = args.get("scope_hash", self.default_scope)
         return self.mem.consolidate_clusters(
-            scope_hash=args["scope_hash"],
+            scope_hash=scope,
             similarity_threshold=args.get("similarity_threshold", 0.95)
         )
 
@@ -186,7 +189,7 @@ class MCPServer:
                                     "ttl": {"type": "integer"},
                                     "confidence": {"type": "number"}
                                 },
-                                "required": ["content", "intent_mask", "scope_hash"] # Embedding no longer strict required
+                                "required": ["content", "intent_mask"] # Embedding no longer strict required
                             }
                         },
                         {
@@ -214,7 +217,7 @@ class MCPServer:
                                 "properties": {
                                     "scope_hash": {"type": "string"}
                                 },
-                                "required": ["scope_hash"]
+                                "required": []
                             }
                         },
                         {
@@ -237,7 +240,7 @@ class MCPServer:
                                 "properties": {
                                     "scope_hash": {"type": "string"}
                                 },
-                                "required": ["scope_hash"]
+                                "required": []
                             }
                         },
                         {
@@ -256,7 +259,7 @@ class MCPServer:
                                 "properties": {
                                     "scope_hash": {"type": "string"}
                                 },
-                                "required": ["scope_hash"]
+                                "required": []
                             }
                         },
                         {
@@ -265,10 +268,9 @@ class MCPServer:
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "scope_hash": {"type": "string"},
                                     "similarity_threshold": {"type": "number"}
                                 },
-                                "required": ["scope_hash"]
+                                "required": []
                             }
                         }
                     ]
