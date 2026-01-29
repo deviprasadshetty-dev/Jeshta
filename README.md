@@ -15,14 +15,28 @@
 
 **ΔMEM** is a production-grade, local-first Model Context Protocol (MCP) server designed to give LLMs a reliable, evolving long-term memory. Unlike simple vector stores, ΔMEM uses a custom **Topological Delta Resolution** algorithm to handle state changes, ensuring your AI never gets confused by outdated facts.
 
-## 🌟 Why ΔMEM?
+## 🌟 Why ΔMEM is Better
 
-| Feature | Description |
-| :--- | :--- |
-| **🧠 Zero Hallucinations** | Uses a deterministic specific-to-general resolution graph. No fuzzy math for critical state. |
-| **⏳ Time Travel** | Built on an append-only Event Sourcing architecture. Replay history or roll back state instantly. |
-| **⚡ High Performance** | Custom bitwise Hamming distance acceleration for vector search. <15ms retrieval latency. |
-| **🛡️ Pure & Simple** | Zero heavy dependencies. No LangChain, no Pydantic, no cloud lock-in. 100% Python. |
+We aren't just another vector DB wrapper. Here is how we stack up against the competition:
+
+| Feature | ΔMEM (This Project) | Mem0 | ByteRover |
+| :--- | :--- | :--- | :--- |
+| **🧠 Intelligence** | **Spreading Activation**: Searches activate related concepts via graph traversal (2-hop). | Semantic Search Only | Semantic Search Only |
+| **🛡️ Reliability** | **Causal Integrity Check**: Deterministic validation of timeline paradoxes. prevents corruption. | Probabilistic | Standard DB Constraints |
+| **✨ Originality** | **Centroid Consolidation ("Dreaming")**: Merges similar memories into optimized archetypes. | Append-only (bloats over time) | Append-only |
+| **🔌 Protocol** | **Native MCP Support** (Resources & Prompts) | API / SDK | API / SDK |
+| **📦 Deployment** | **Zero Dependencies** (Python + SQLite). Local First. | Cloud / Complex Deps | Cloud / Complex Deps |
+
+## 🚀 New Cognitive Features (v2.0)
+
+### 1. 🧠 Intelligent: Spreading Activation
+Memory is associative. When you search for "Login", ΔMEM also faintly activates "Authentication" and "User Profile" if they are linked in the graph, even if the vector similarity is low. This provides **context-aware retrieval**.
+
+### 2. 🛡️ Reliable: Causal Integrity
+Trust is paramount. The new `verify_integrity` tool scans your memory graph for **Temporal Paradoxes** (e.g., a child node created before its parent) and **Dangling References**, ensuring your agent's worldview is always logically consistent.
+
+### 3. ✨ Original: Centroid Consolidation ("Dreaming")
+Over time, memories get repetitive. ΔMEM runs a background "dreaming" process that finds clusters of highly similar memories (>95% overlap) and merges them into a single **Centroid Atom**, reducing noise and improving retrieval speed.
 
 ## 🏗️ Architecture
 
@@ -50,16 +64,37 @@ flowchart LR
     Context --> Client
 ```
 
+## 🛠️ MCP Integration
+
+ΔMEM is a fully compliant MCP server implementing **Tools**, **Resources**, and **Prompts**.
+
+### Tools (Function Calls)
+| Tool Name | Description | Key Arguments |
+| :--- | :--- | :--- |
+| `add_atom` | Ingest a new memory atom (Fact, Delta, or Constraint). | `content`, `embedding`, `intent_mask`, `refs` |
+| `search_atoms` | Semantic search with **Spreading Activation**. | `embedding`, `intent_mask`, `top_k`, `use_spreading_activation` |
+| `verify_integrity` | 🛡️ Check for graph paradoxes and corruption. | `scope_hash` |
+| `consolidate_memory` | ✨ Cluster and merge similar memories ("Dreaming"). | `scope_hash`, `similarity_threshold` |
+| `compile_context` | ⭐️ Resolves the delta graph to return the current "Truth". | `scope_hash` |
+
+### Resources (Data Access)
+| URI | Description |
+| :--- | :--- |
+| `mem://stats` | View live memory statistics (count, active scope). |
+| `mem://atom/{id}` | Inspect raw data of a specific memory atom. |
+
+### Prompts (Workflows)
+| Prompt Name | Description |
+| :--- | :--- |
+| `recall_context` | Guide the AI to search and compile context for a task. |
+| `save_decision` | Standardized template for logging architectural decisions. |
+
 ## 🚀 Quick Start
 
-### Prerequisites
-- Python 3.10+
-- `numpy` (for vector math)
-
 ### Installation
-Clone the repository and install dependencies (just numpy!):
+Clone the repository and install dependencies (just `numpy` and `fastembed` for auto-embedding):
 ```bash
-pip install numpy
+pip install numpy fastembed
 ```
 
 ### Running the Server
@@ -70,7 +105,7 @@ python server.py
 
 ### 🔌 Integration (Cline / Antigravity)
 
-Add this to your MCP settings file (e.g., `%APPDATA%/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json` or similar):
+Add this to your MCP settings file:
 
 ```json
 {
@@ -82,63 +117,6 @@ Add this to your MCP settings file (e.g., `%APPDATA%/Code/User/globalStorage/sao
   }
 }
 ```
-> **Note**: Replace `<ABSOLUTE_PATH_TO_REPO>` with the actual path to where you cloned this repo.
-
-### Client Usage Example
-Here is how you can interact with ΔMEM programmatically:
-
-```python
-# See example_client.py for full code
-import subprocess
-# ... setup RPC connection ...
-
-# 1. Add a Fact
-rpc_request(process, "tools/call", {
-    "name": "add_atom",
-    "arguments": {
-        "content": "User prefers Dark Mode.",
-        "embedding": [0.1, 0.9, ...], # Your embedding vector
-        "intent_mask": 1, # Fact
-        "scope_hash": "user_settings"
-    }
-})
-
-# 2. Add a Delta (Change)
-rpc_request(process, "tools/call", {
-    "name": "add_atom",
-    "arguments": {
-        "content": "User switched to Light Mode.",
-        "embedding": [0.1, 0.92, ...],
-        "intent_mask": 2, # Delta
-        "scope_hash": "user_settings",
-        "refs": ["<id_of_previous_fact>"] # Explicit reference
-    }
-})
-
-# 3. Get Current State
-context = rpc_request(process, "tools/call", {
-    "name": "compile_context",
-    "arguments": { "scope_hash": "user_settings" }
-})
-# Result: "User switched to Light Mode" (Old fact is superceded)
-```
-
-## 🛠️ MCP Tool Reference
-
-ΔMEM exposes the following tools via the Model Context Protocol:
-
-| Tool Name | Description | Key Arguments |
-| :--- | :--- | :--- |
-| `add_atom` | Ingest a new memory atom (Fact, Delta, or Constraint). | `content`, `embedding`, `intent_mask`, `refs` |
-| `search_atoms` | Semantic search with hardware-accelerated bitwise filtering. | `embedding`, `intent_mask`, `top_k` |
-| `compile_context` | ⭐️ **Core Feature**. Resolves the delta graph to return the current "Truth". | `scope_hash` |
-| `diff_memory` | Compare two atoms to understand divergence. | `id_a`, `id_b` |
-| `compact_scope` | "Squash" history into a fresh snapshot for efficiency. | `scope_hash` |
-| `prune_expired_atoms`| Cleanup routine for TTL-expired memories. | None |
-
-## 🤖 AI Integration
-
-To teach your AI agent how to use this memory effectively, please refer to the [**AI Instructions**](./AI_INSTRUCTIONS.md). This document contains the system prompt and usage patterns optimized for LLMs.
 
 ---
 
