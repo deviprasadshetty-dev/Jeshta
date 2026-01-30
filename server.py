@@ -19,19 +19,15 @@ class MCPServer:
         self.default_scope = os.path.basename(os.getcwd())
         logging.info(f"Default scope set to: {self.default_scope}")
 
+        # Simplified tool surface: 6 essential tools only
+        # Maintenance tools (compact, prune, consolidate) run internally
         self.tools = {
-            "add_atom": self.add_atom,
-            "search_atoms": self.search_atoms,
-            "compile_context": self.compile_context,
-            "diff_memory": self.diff_memory,
-            "compact_scope": self.compact_scope,
-            "prune_expired_atoms": self.prune_expired_atoms,
-            "verify_integrity": self.verify_integrity,
-            "prune_expired_atoms": self.prune_expired_atoms,
-            "verify_integrity": self.verify_integrity,
-            "consolidate_memory": self.consolidate_memory,
-            "delete_atom": self.delete_atom,
-            "recall_related": self.recall_related
+            "add_atom": self.add_atom,           # Write (auto-detects global scope)
+            "search_atoms": self.search_atoms,   # Read (uses hierarchical by default)
+            "compile_context": self.compile_context,  # Session init
+            "delete_atom": self.delete_atom,     # Explicit forget
+            "recall_related": self.recall_related,    # Explainability
+            "verify_integrity": self.verify_integrity # Self-check
         }
         
         # Initialize Embedder (Optional)
@@ -56,19 +52,28 @@ class MCPServer:
             if f not in args:
                 raise ValueError(f"Missing field: {f}")
         
+        # Ensure content is a string
+        content = str(args["content"]) if args["content"] is not None else ""
+        if not content.strip():
+            raise ValueError("Content cannot be empty")
+        
         scope = args.get("scope_hash", self.default_scope)
         
         embedding = args.get("embedding")
         if embedding is None:
             if self.embedder:
-                # Generate embedding
-                # fastembed returns a generator, so we take the first item
-                embedding = list(self.embedder.embed([args["content"]]))[0].tolist()
+                try:
+                    # Generate embedding - fastembed expects a list of strings
+                    embeddings = list(self.embedder.embed([content]))
+                    embedding = embeddings[0].tolist()
+                except Exception as e:
+                    logging.error(f"Embedding error: {e}")
+                    raise ValueError(f"Failed to generate embedding: {e}")
             else:
                 raise ValueError("Missing field: embedding (and no local embedder available)")
         
         return self.mem.ingest(
-            content=args["content"],
+            content=content,
             embedding=embedding,
             intent_mask=args["intent_mask"],
             scope_hash=scope,
@@ -78,29 +83,29 @@ class MCPServer:
         )
 
     def search_atoms(self, args: Dict[str, Any]) -> Any:
-        # Args: embedding, intent_mask, scope_hash?, top_k?
+        """
+        Unified search: uses hierarchical (project + global) by default.
+        Also updates access stats for forgetting curve.
+        """
         if "embedding" not in args and "query" in args:
-             # Support "query" if embedding missing
-             if self.embedder:
-                 args["embedding"] = list(self.embedder.embed([args["query"]]))[0].tolist()
-             else:
-                 raise ValueError("Missing field: embedding (and no local embedder to process 'query')")
+            if self.embedder:
+                args["embedding"] = list(self.embedder.embed([args["query"]]))[0].tolist()
+            else:
+                raise ValueError("Missing field: embedding (and no local embedder to process 'query')")
 
-        req_fields = ["embedding", "intent_mask"]
-        for f in req_fields:
-            if f not in args:
-                raise ValueError(f"Missing field: {f}")
-                
-        results = self.mem.search(
-            query_emb=args["embedding"],
-            intent_mask=args["intent_mask"],
-            scope_hash=args.get("scope_hash", self.default_scope),
+        # intent_mask=0 means search all types
+        intent_mask = args.get("intent_mask", 0)
+        
+        # Use hierarchical search by default (project > global)
+        results = self.mem.search_hierarchical(
+            query_emb=args.get("embedding"),
+            intent_mask=intent_mask,
+            project_scope=args.get("scope_hash", self.default_scope),
             top_k=args.get("top_k", 10),
             use_spreading_activation=args.get("use_spreading_activation", True),
-            query_text=args.get("query") # Pass raw query for FTS
+            query_text=args.get("query")
         )
-        # Format results: list of {atom: ..., score: ...}
-        # But atom needs to be serializable
+        
         out = []
         for atom, score in results:
             d = atom.to_dict()
@@ -110,7 +115,8 @@ class MCPServer:
 
     def compile_context(self, args: Dict[str, Any]) -> Dict[str, Any]:
         scope = args.get("scope_hash", self.default_scope)
-        return self.mem.compile_context(scope)
+        # Use hierarchical context by default (merges global + project)
+        return self.mem.compile_context_hierarchical(scope)
 
     def diff_memory(self, args: Dict[str, Any]) -> Any:
         if "id_a" not in args or "id_b" not in args:
@@ -145,6 +151,70 @@ class MCPServer:
         if "atom_id" not in args:
              raise ValueError("Missing field: atom_id")
         return self.mem.recall_related(args["atom_id"])
+
+    # --------------------------------------------------------------------------
+    # NEW TOOLS: Multi-Scope & Forgetting Curve
+    # --------------------------------------------------------------------------
+    
+    def add_global_memory(self, args: Dict[str, Any]) -> str:
+        """Add a memory to global scope (persists across ALL projects)."""
+        req_fields = ["content", "intent_mask"]
+        for f in req_fields:
+            if f not in args:
+                raise ValueError(f"Missing field: {f}")
+        
+        embedding = args.get("embedding")
+        if embedding is None:
+            if self.embedder:
+                embedding = list(self.embedder.embed([args["content"]]))[0].tolist()
+            else:
+                raise ValueError("Missing field: embedding (and no local embedder available)")
+        
+        return self.mem.ingest_global(
+            content=args["content"],
+            embedding=embedding,
+            intent_mask=args["intent_mask"],
+            refs=args.get("refs"),
+            ttl=args.get("ttl"),
+            confidence=args.get("confidence", 1.0)
+        )
+
+    def search_hierarchical(self, args: Dict[str, Any]) -> Any:
+        """Search across project + global scope with priority weighting."""
+        if "embedding" not in args and "query" in args:
+            if self.embedder:
+                args["embedding"] = list(self.embedder.embed([args["query"]]))[0].tolist()
+            else:
+                raise ValueError("Missing field: embedding (and no local embedder to process 'query')")
+
+        if "intent_mask" not in args:
+            raise ValueError("Missing field: intent_mask")
+        
+        results = self.mem.search_hierarchical(
+            query_emb=args.get("embedding"),
+            intent_mask=args["intent_mask"],
+            project_scope=args.get("scope_hash", self.default_scope),
+            top_k=args.get("top_k", 10),
+            use_spreading_activation=args.get("use_spreading_activation", True),
+            query_text=args.get("query")
+        )
+        
+        out = []
+        for atom, score in results:
+            d = atom.to_dict()
+            d["_score"] = score
+            out.append(d)
+        return out
+
+    def prune_forgotten(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Prune memories with low retention (forgotten by lack of access)."""
+        threshold = args.get("threshold", 0.1)
+        return self.mem.prune_forgotten(threshold=threshold)
+
+    def get_memory_health(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get health statistics including retention distribution."""
+        scope = args.get("scope_hash")
+        return self.mem.get_memory_health(scope_hash=scope)
 
     def run(self):
         # Read from stdin line by line
@@ -210,19 +280,18 @@ class MCPServer:
                         },
                         {
                             "name": "search_atoms",
-                            "description": "Search for relevant atoms",
+                            "description": "Search for relevant atoms (searches project + global scopes with priority)",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "embedding": {"type": "array", "items": {"type": "number"}},
-                                    "query": {"type": "string"}, # Added support for raw query
+                                    "query": {"type": "string"},
                                     "intent_mask": {"type": "integer"},
-                                    "scope_hash": {"type": "string"},
                                     "scope_hash": {"type": "string"},
                                     "top_k": {"type": "integer"},
                                     "use_spreading_activation": {"type": "boolean"}
                                 },
-                                "required": ["intent_mask"] # Embedding/Query optional group
+                                "required": []
                             }
                         },
                         {
@@ -232,59 +301,6 @@ class MCPServer:
                                 "type": "object",
                                 "properties": {
                                     "scope_hash": {"type": "string"}
-                                },
-                                "required": []
-                            }
-                        },
-                        {
-                            "name": "diff_memory",
-                            "description": "Compare two atoms",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "id_a": {"type": "string"},
-                                    "id_b": {"type": "string"}
-                                },
-                                "required": ["id_a", "id_b"]
-                            }
-                        },
-                        {
-                            "name": "compact_scope",
-                            "description": "Squash history into snapshots",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "scope_hash": {"type": "string"}
-                                },
-                                "required": []
-                            }
-                        },
-                        {
-                            "name": "prune_expired_atoms",
-                            "description": "Delete expired atoms",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {}
-                            }
-                        },
-                        {
-                            "name": "verify_integrity",
-                            "description": "Check for graph paradoxes and corruption",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "scope_hash": {"type": "string"}
-                                },
-                                "required": []
-                            }
-                        },
-                        {
-                            "name": "consolidate_memory",
-                            "description": "Cluster and merge similar memories (Dreaming)",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "similarity_threshold": {"type": "number"}
                                 },
                                 "required": []
                             }
@@ -309,6 +325,17 @@ class MCPServer:
                                     "atom_id": {"type": "string"}
                                 },
                                 "required": ["atom_id"]
+                            }
+                        },
+                        {
+                            "name": "verify_integrity",
+                            "description": "Check for graph paradoxes and corruption",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "scope_hash": {"type": "string"}
+                                },
+                                "required": []
                             }
                         }
                     ]

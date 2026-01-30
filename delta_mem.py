@@ -4,8 +4,53 @@ import time
 import math
 import os
 import dataclasses
-from typing import List, Optional, Dict, Any, Tuple
+import random
+from typing import List, Optional, Dict, Any, Tuple, Set
 import numpy as np
+
+# ------------------------------------------------------------------------------
+# SCOPE MANAGEMENT (Global vs Project)
+# ------------------------------------------------------------------------------
+
+class ScopeManager:
+    """
+    Hierarchical scope system:
+    - GLOBAL: User preferences, coding style (persists across ALL projects)
+    - PROJECT: Architecture decisions, domain knowledge (per workspace)
+    - SESSION: Ephemeral context (cleared after session ends)
+    """
+    GLOBAL_SCOPE = "__global__"
+    SESSION_SCOPE = "__session__"
+    
+    # Keywords that indicate a memory should be global
+    GLOBAL_KEYWORDS = [
+        "always", "never", "prefer", "style", "format",
+        "i like", "i want", "my preference", "my style",
+        "all projects", "every project", "globally"
+    ]
+    
+    @staticmethod
+    def get_scope_chain(project_scope: str) -> List[str]:
+        """Returns scopes to search, in priority order (project first)."""
+        return [
+            project_scope,              # Project-specific (highest priority)
+            ScopeManager.GLOBAL_SCOPE,  # Global preferences (fallback)
+        ]
+    
+    @staticmethod
+    def is_global(content: str) -> bool:
+        """Auto-detect if memory should be stored globally."""
+        content_lower = content.lower()
+        return any(kw in content_lower for kw in ScopeManager.GLOBAL_KEYWORDS)
+    
+    @staticmethod
+    def get_scope_type(scope_hash: str) -> str:
+        """Determine the type of a scope."""
+        if scope_hash == ScopeManager.GLOBAL_SCOPE:
+            return "global"
+        elif scope_hash == ScopeManager.SESSION_SCOPE:
+            return "session"
+        return "project"
 
 # ------------------------------------------------------------------------------
 # CORE PRIMITIVE
@@ -22,7 +67,11 @@ class MemoryAtom:
     confidence: float
     refs: List[str]
     created_at: int
-    original_dim: int = 0 # Default for backward compatibility or ease
+    original_dim: int = 0
+    # Forgetting Curve fields
+    access_count: int = 0
+    last_accessed: int = 0
+    scope_type: str = "project"  # 'global', 'project', 'session'
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -31,22 +80,26 @@ class MemoryAtom:
             "embedding": self.embedding.tolist(),
             "intent_mask": self.intent_mask,
             "scope_hash": self.scope_hash,
+            "scope_type": self.scope_type,
             "ttl": self.ttl,
             "confidence": self.confidence,
             "refs": self.refs,
             "created_at": self.created_at,
+            "access_count": self.access_count,
+            "last_accessed": self.last_accessed,
         }
 
     @staticmethod
     def from_row(row: Tuple) -> 'MemoryAtom':
-        # row: (id, content, embedding_bytes, intent_mask, scope_hash, ttl, confidence, refs_json, created_at)
+        # row: (id, content, embedding, intent_mask, scope_hash, ttl, confidence, refs, created_at, original_dim, access_count, last_accessed, scope_type)
         emb_bytes = row[2]
         embedding = np.frombuffer(emb_bytes, dtype=np.uint8)
         
-        # Backward compatibility for schema
-        original_dim = 0
-        if len(row) > 9:
-            original_dim = row[9]
+        # Backward compatibility for extended schema
+        original_dim = row[9] if len(row) > 9 else 0
+        access_count = row[10] if len(row) > 10 else 0
+        last_accessed = row[11] if len(row) > 11 else 0
+        scope_type = row[12] if len(row) > 12 else "project"
             
         return MemoryAtom(
             id=row[0],
@@ -58,7 +111,10 @@ class MemoryAtom:
             confidence=row[6],
             refs=json.loads(row[7]),
             created_at=row[8],
-            original_dim=original_dim
+            original_dim=original_dim,
+            access_count=access_count,
+            last_accessed=last_accessed,
+            scope_type=scope_type
         )
 
 # ------------------------------------------------------------------------------
@@ -89,10 +145,22 @@ class DeltaDB:
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_scope ON atoms(scope_hash)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_created_at ON atoms(created_at)")
             
-            # Migration: Check for original_dim
+            # Migrations: Check for new columns and add if missing
             columns = [info[1] for info in self.conn.execute("PRAGMA table_info(atoms)")]
+            
             if "original_dim" not in columns:
                 self.conn.execute("ALTER TABLE atoms ADD COLUMN original_dim INTEGER DEFAULT 0")
+            
+            # Forgetting Curve columns
+            if "access_count" not in columns:
+                self.conn.execute("ALTER TABLE atoms ADD COLUMN access_count INTEGER DEFAULT 0")
+            if "last_accessed" not in columns:
+                self.conn.execute("ALTER TABLE atoms ADD COLUMN last_accessed INTEGER DEFAULT 0")
+            
+            # Multi-Scope columns
+            if "scope_type" not in columns:
+                self.conn.execute("ALTER TABLE atoms ADD COLUMN scope_type TEXT DEFAULT 'project'")
+                self.conn.execute("CREATE INDEX IF NOT EXISTS idx_scope_type ON atoms(scope_type)")
 
             # FTS5 Virtual Table for Hybrid Search
             try:
@@ -130,10 +198,22 @@ class DeltaDB:
         
         with self.conn:
             self.conn.execute("""
-                INSERT INTO atoms (id, content, embedding, intent_mask, scope_hash, ttl, confidence, refs, created_at, original_dim)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO atoms (id, content, embedding, intent_mask, scope_hash, ttl, confidence, refs, created_at, original_dim, access_count, last_accessed, scope_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (atom.id, atom.content, emb_bytes, atom.intent_mask, atom.scope_hash, 
-                  atom.ttl, atom.confidence, refs_json, atom.created_at, atom.original_dim))
+                  atom.ttl, atom.confidence, refs_json, atom.created_at, atom.original_dim,
+                  atom.access_count, atom.last_accessed, atom.scope_type))
+
+    def update_access_stats(self, atom_ids: List[str], current_time: int):
+        """Increment access count and update last_accessed for forgetting curve."""
+        if not atom_ids:
+            return
+        with self.conn:
+            for atom_id in atom_ids:
+                self.conn.execute(
+                    "UPDATE atoms SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
+                    (current_time, atom_id)
+                )
 
     def get_atoms_by_ids(self, ids: List[str]) -> List[MemoryAtom]:
         if not ids:
@@ -323,32 +403,47 @@ class DeltaMem:
         self.index = VectorIndex(active_atoms)
 
     def ingest(self, content: str, embedding: List[float], intent_mask: int, 
-               scope_hash: str, refs: List[str] = None, ttl: int = None, confidence: float = 1.0):
+               scope_hash: str, refs: List[str] = None, ttl: int = None, 
+               confidence: float = 1.0, force_global: bool = False):
+        """
+        Ingest a new memory atom.
         
+        Args:
+            force_global: If True, always store in global scope
+        """
         # Binary Quantization (Float -> Packed Bits)
-        # 1. Convert to numpy
         vec = np.array(embedding, dtype=np.float32)
-        # 2. Threshold at 0 (Sign bit)
         bits = (vec > 0).astype(np.uint8)
-        # 3. Pack bits
         packed = np.packbits(bits)
         
-        # Deterministic ID based on content hash and time window for collision avoidance
-        atom_id = f"{int(time.time()*1000)}_{abs(hash(content))}"
+        # Auto-detect global scope based on content keywords
+        if force_global or ScopeManager.is_global(content):
+            effective_scope = ScopeManager.GLOBAL_SCOPE
+            scope_type = "global"
+        else:
+            effective_scope = scope_hash
+            scope_type = ScopeManager.get_scope_type(scope_hash)
+        
+        # Generate unique ID
+        atom_id = f"{int(time.time()*1000)}_{abs(hash(content))}_{random.randint(0, 9999)}"
         if refs is None:
             refs = []
-            
+        
+        current_time = int(time.time())
         atom = MemoryAtom(
             id=atom_id,
             content=content,
-            embedding=packed, # Stored as binary blob
+            embedding=packed,
             intent_mask=intent_mask,
-            scope_hash=scope_hash,
+            scope_hash=effective_scope,
             ttl=ttl,
             confidence=confidence,
             refs=refs,
-            created_at=int(time.time()),
-            original_dim=len(embedding)
+            created_at=current_time,
+            original_dim=len(embedding),
+            access_count=0,
+            last_accessed=current_time,
+            scope_type=scope_type
         )
         self.db.add_atom(atom)
         
@@ -899,3 +994,246 @@ class DeltaMem:
             "parents": [a.to_dict() for a in related["parents"]],
             "children": [a.to_dict() for a in related["children"]]
         }
+
+    # --------------------------------------------------------------------------
+    # MULTI-SCOPE ARCHITECTURE (Global vs Project)
+    # --------------------------------------------------------------------------
+    
+    def search_hierarchical(self, query_emb: List[float], intent_mask: int, 
+                           project_scope: str, top_k: int = 10, 
+                           use_spreading_activation: bool = True,
+                           query_text: str = None) -> List[Tuple[Any, float]]:
+        """
+        Search across project → global scope hierarchy with priority weighting.
+        Project-specific memories override global when there's overlap.
+        """
+        all_results = {}
+        scope_chain = ScopeManager.get_scope_chain(project_scope)
+        
+        for priority, scope in enumerate(scope_chain):
+            scope_results = self.search(
+                query_emb=query_emb,
+                intent_mask=intent_mask,
+                scope_hash=scope,
+                top_k=top_k * 2,
+                use_spreading_activation=use_spreading_activation,
+                query_text=query_text
+            )
+            
+            for atom, score in scope_results:
+                # Apply scope priority boost (project > global)
+                # priority 0 = project (no penalty), priority 1 = global (10% penalty)
+                boosted_score = score * (1.0 - priority * 0.1)
+                
+                if atom.id not in all_results or all_results[atom.id][1] < boosted_score:
+                    all_results[atom.id] = (atom, boosted_score)
+        
+        # Update access stats for returned atoms (forgetting curve)
+        current_time = int(time.time())
+        accessed_ids = list(all_results.keys())[:top_k]
+        self.db.update_access_stats(accessed_ids, current_time)
+        
+        # Sort and return top_k
+        results = sorted(all_results.values(), key=lambda x: x[1], reverse=True)
+        return results[:top_k]
+
+    def compile_context_hierarchical(self, project_scope: str) -> Dict[str, Any]:
+        """
+        Compile context merging project + global memories.
+        Global facts are included but project facts take precedence.
+        """
+        project_ctx = self.compile_context(project_scope)
+        global_ctx = self.compile_context(ScopeManager.GLOBAL_SCOPE)
+        
+        return {
+            "stable_facts": global_ctx["stable_facts"] + project_ctx["stable_facts"],
+            "recent_deltas": project_ctx["recent_deltas"],  # Only project deltas
+            "active_constraints": global_ctx["active_constraints"] + project_ctx["active_constraints"],
+            "low_confidence_flags": project_ctx["low_confidence_flags"],
+            "_meta": {
+                "project_scope": project_scope,
+                "global_atoms_count": len(global_ctx["stable_facts"]) + len(global_ctx["active_constraints"]),
+                "project_atoms_count": len(project_ctx["stable_facts"]) + len(project_ctx["recent_deltas"])
+            }
+        }
+
+    def ingest_global(self, content: str, embedding: List[float], intent_mask: int,
+                     refs: List[str] = None, ttl: int = None, confidence: float = 1.0) -> str:
+        """
+        Explicitly ingest to global scope (user preferences, style rules).
+        """
+        return self.ingest(
+            content=content,
+            embedding=embedding,
+            intent_mask=intent_mask,
+            scope_hash=ScopeManager.GLOBAL_SCOPE,
+            refs=refs,
+            ttl=ttl,
+            confidence=confidence,
+            force_global=True
+        )
+
+    # --------------------------------------------------------------------------
+    # FORGETTING CURVE (Ebbinghaus-inspired memory decay)
+    # --------------------------------------------------------------------------
+    
+    @staticmethod
+    def temporal_score(created_at: int, current_time: int, half_life: int = 604800) -> float:
+        """
+        Exponential decay score based on age.
+        
+        Args:
+            created_at: Unix timestamp of creation
+            current_time: Current unix timestamp
+            half_life: Time in seconds for score to halve (default: 7 days)
+        
+        Returns:
+            Score between 0 and 1, where 1 is most recent
+        """
+        age = current_time - created_at
+        if age <= 0:
+            return 1.0
+        return 2 ** (-age / half_life)
+
+    @staticmethod
+    def calculate_retention(access_count: int, last_accessed: int, 
+                           current_time: int) -> float:
+        """
+        Calculate memory retention based on Ebbinghaus forgetting curve.
+        
+        Retention = e^(-t/S) where:
+        - t = time since last access (in days)
+        - S = stability (grows with reinforcement/access_count)
+        
+        Based on SuperMemo SM-2 algorithm principles.
+        """
+        # Stability increases with each access (logarithmically)
+        stability = 1.0 + (0.5 * math.log1p(access_count))
+        
+        # Time since last access in days
+        if last_accessed == 0:
+            # Never accessed, use created_at effectively
+            return 0.5  # Default medium retention
+        
+        age_days = (current_time - last_accessed) / 86400.0
+        if age_days <= 0:
+            return 1.0
+        
+        return math.exp(-age_days / stability)
+
+    def prune_forgotten(self, threshold: float = 0.1) -> Dict[str, Any]:
+        """
+        Prune atoms with retention below threshold (forgotten memories).
+        
+        Args:
+            threshold: Retention threshold (0-1). Atoms below this are pruned.
+                      Default 0.1 means atoms with <10% retention are forgotten.
+        
+        Returns:
+            Dict with pruned count and details
+        """
+        current_time = int(time.time())
+        
+        # Get all active atoms
+        cursor = self.db.conn.execute(
+            "SELECT * FROM atoms WHERE ttl IS NULL OR ttl > ?", 
+            (current_time,)
+        )
+        
+        to_forget = []
+        for row in cursor:
+            atom = MemoryAtom.from_row(row)
+            
+            # Skip global scope - never auto-forget user preferences
+            if atom.scope_type == "global":
+                continue
+            
+            retention = self.calculate_retention(
+                atom.access_count, 
+                atom.last_accessed, 
+                current_time
+            )
+            
+            if retention < threshold:
+                to_forget.append({
+                    "id": atom.id,
+                    "content": atom.content[:50] + "..." if len(atom.content) > 50 else atom.content,
+                    "retention": retention,
+                    "access_count": atom.access_count
+                })
+        
+        # Soft-delete forgotten atoms
+        expire_time = current_time - 1
+        for item in to_forget:
+            self.db.soft_delete_atom(item["id"], expire_time)
+            # Remove from index
+            if item["id"] in self.index.atoms_map:
+                del self.index.atoms_map[item["id"]]
+                try:
+                    self.index.ids.remove(item["id"])
+                except ValueError:
+                    pass
+        
+        return {
+            "pruned_count": len(to_forget),
+            "threshold": threshold,
+            "details": to_forget[:10]  # Return first 10 for inspection
+        }
+
+    def get_memory_health(self, scope_hash: str = None) -> Dict[str, Any]:
+        """
+        Get health statistics for the memory system.
+        Useful for understanding retention distribution.
+        """
+        current_time = int(time.time())
+        
+        query = "SELECT * FROM atoms WHERE ttl IS NULL OR ttl > ?"
+        params = [current_time]
+        
+        if scope_hash:
+            query += " AND scope_hash = ?"
+            params.append(scope_hash)
+        
+        cursor = self.db.conn.execute(query, params)
+        
+        stats = {
+            "total": 0,
+            "by_scope_type": {"global": 0, "project": 0, "session": 0},
+            "retention_buckets": {
+                "strong (>0.8)": 0,
+                "medium (0.4-0.8)": 0,
+                "weak (0.1-0.4)": 0,
+                "forgotten (<0.1)": 0
+            },
+            "avg_access_count": 0
+        }
+        
+        total_access = 0
+        for row in cursor:
+            atom = MemoryAtom.from_row(row)
+            stats["total"] += 1
+            
+            # Count by scope type
+            scope_type = atom.scope_type or "project"
+            stats["by_scope_type"][scope_type] = stats["by_scope_type"].get(scope_type, 0) + 1
+            
+            # Calculate retention
+            retention = self.calculate_retention(
+                atom.access_count, atom.last_accessed, current_time
+            )
+            
+            if retention > 0.8:
+                stats["retention_buckets"]["strong (>0.8)"] += 1
+            elif retention > 0.4:
+                stats["retention_buckets"]["medium (0.4-0.8)"] += 1
+            elif retention > 0.1:
+                stats["retention_buckets"]["weak (0.1-0.4)"] += 1
+            else:
+                stats["retention_buckets"]["forgotten (<0.1)"] += 1
+            
+            total_access += atom.access_count
+        
+        if stats["total"] > 0:
+            stats["avg_access_count"] = round(total_access / stats["total"], 2)
+        
+        return stats
