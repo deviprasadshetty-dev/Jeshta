@@ -72,6 +72,8 @@ class MemoryAtom:
     access_count: int = 0
     last_accessed: int = 0
     scope_type: str = "project"  # 'global', 'project', 'session'
+    # Importance/Pinning (P3)
+    importance: int = 5  # 1-10, where 10 = pinned (never decays)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -87,11 +89,12 @@ class MemoryAtom:
             "created_at": self.created_at,
             "access_count": self.access_count,
             "last_accessed": self.last_accessed,
+            "importance": self.importance,
         }
 
     @staticmethod
     def from_row(row: Tuple) -> 'MemoryAtom':
-        # row: (id, content, embedding, intent_mask, scope_hash, ttl, confidence, refs, created_at, original_dim, access_count, last_accessed, scope_type)
+        # row: (id, content, embedding, intent_mask, scope_hash, ttl, confidence, refs, created_at, original_dim, access_count, last_accessed, scope_type, importance)
         emb_bytes = row[2]
         embedding = np.frombuffer(emb_bytes, dtype=np.uint8)
         
@@ -100,6 +103,7 @@ class MemoryAtom:
         access_count = row[10] if len(row) > 10 else 0
         last_accessed = row[11] if len(row) > 11 else 0
         scope_type = row[12] if len(row) > 12 else "project"
+        importance = row[13] if len(row) > 13 else 5  # Default importance
             
         return MemoryAtom(
             id=row[0],
@@ -114,7 +118,8 @@ class MemoryAtom:
             original_dim=original_dim,
             access_count=access_count,
             last_accessed=last_accessed,
-            scope_type=scope_type
+            scope_type=scope_type,
+            importance=importance
         )
 
 # ------------------------------------------------------------------------------
@@ -162,6 +167,10 @@ class DeltaDB:
                 self.conn.execute("ALTER TABLE atoms ADD COLUMN scope_type TEXT DEFAULT 'project'")
                 self.conn.execute("CREATE INDEX IF NOT EXISTS idx_scope_type ON atoms(scope_type)")
 
+            # Importance/Pinning column (P3)
+            if "importance" not in columns:
+                self.conn.execute("ALTER TABLE atoms ADD COLUMN importance INTEGER DEFAULT 5")
+
             # FTS5 Virtual Table for Hybrid Search
             try:
                 self.conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS atoms_fts USING fts5(content, content='atoms', content_rowid='rowid')")
@@ -198,11 +207,11 @@ class DeltaDB:
         
         with self.conn:
             self.conn.execute("""
-                INSERT INTO atoms (id, content, embedding, intent_mask, scope_hash, ttl, confidence, refs, created_at, original_dim, access_count, last_accessed, scope_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO atoms (id, content, embedding, intent_mask, scope_hash, ttl, confidence, refs, created_at, original_dim, access_count, last_accessed, scope_type, importance)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (atom.id, atom.content, emb_bytes, atom.intent_mask, atom.scope_hash, 
                   atom.ttl, atom.confidence, refs_json, atom.created_at, atom.original_dim,
-                  atom.access_count, atom.last_accessed, atom.scope_type))
+                  atom.access_count, atom.last_accessed, atom.scope_type, atom.importance))
 
     def update_access_stats(self, atom_ids: List[str], current_time: int):
         """Increment access count and update last_accessed for forgetting curve."""
@@ -383,6 +392,8 @@ class VectorIndex:
 
 class DeltaMem:
     def __init__(self, db_path: str = "delta_mem.db"):
+        self.db_path = db_path
+        self.idx_mtime = 0
         self.db = DeltaDB(db_path)
         
         # Scoring Weights (Fixed per specification)
@@ -401,15 +412,156 @@ class DeltaMem:
         current_time = int(time.time())
         active_atoms = self.db.get_all_active_atoms(current_time)
         self.index = VectorIndex(active_atoms)
+        
+        # Record the time we loaded the data
+        if os.path.exists(self.db_path):
+            self.idx_mtime = os.path.getmtime(self.db_path)
+
+    # --------------------------------------------------------------------------
+    # P0: DEDUPLICATION ON INGEST
+    # --------------------------------------------------------------------------
+    def _check_duplicate(self, packed_embedding: np.ndarray, scope_hash: str, 
+                         threshold: float = 0.90) -> Optional[str]:
+        """
+        Check if a similar memory already exists.
+        Returns existing atom_id if duplicate found, else None.
+        """
+        if self.index.matrix.size == 0:
+            return None
+        
+        # Search using packed embedding directly
+        results = self.index.search(packed_embedding, top_k=5)
+        
+        current_time = int(time.time())
+        for atom_id, score in results:
+            if score >= threshold:
+                atom = self.index.atoms_map.get(atom_id)
+                if atom and atom.scope_hash == scope_hash:
+                    # Check TTL
+                    if atom.ttl is None or atom.ttl > current_time:
+                        return atom_id
+        return None
+
+    # --------------------------------------------------------------------------
+    # P2: CONTRADICTION DETECTION
+    # --------------------------------------------------------------------------
+    CONTRADICTION_PAIRS = [
+        # (positive, negative) or (mutually_exclusive_set)
+        ("use", "don't use"), ("using", "not using"),
+        ("enable", "disable"), ("enabled", "disabled"),
+        ("prefer", "avoid"), ("always", "never"),
+        ("add", "remove"), ("include", "exclude"),
+        ("yes", "no"), ("true", "false"),
+    ]
+    
+    MUTUALLY_EXCLUSIVE = [
+        # Technologies that are typically either/or choices
+        {"postgresql", "mysql", "sqlite", "mongodb", "mariadb"},
+        {"react", "vue", "angular", "svelte"},
+        {"tabs", "spaces"},
+        {"npm", "yarn", "pnpm"},
+        {"rest", "graphql", "grpc"},
+        {"javascript", "typescript"},  # When discussing preference
+    ]
+
+    def _detect_conflict(self, content: str, packed_embedding: np.ndarray, 
+                         scope_hash: str) -> Optional[Dict[str, Any]]:
+        """
+        Detect potential conflicts with existing memories.
+        Returns conflict info if found, else None.
+        """
+        if self.index.matrix.size == 0:
+            return None
+        
+        content_lower = content.lower()
+        
+        # Search for similar content
+        results = self.index.search(packed_embedding, top_k=10)
+        current_time = int(time.time())
+        
+        for atom_id, score in results:
+            if score < 0.5:  # Too dissimilar to be a conflict
+                continue
+                
+            atom = self.index.atoms_map.get(atom_id)
+            if not atom or atom.scope_hash != scope_hash:
+                continue
+            if atom.ttl is not None and atom.ttl <= current_time:
+                continue
+            
+            existing_lower = atom.content.lower()
+            
+            # Check 1: Contradiction pairs (use vs don't use)
+            for pos, neg in self.CONTRADICTION_PAIRS:
+                if (pos in content_lower and neg in existing_lower) or \
+                   (neg in content_lower and pos in existing_lower):
+                    return {
+                        "type": "negation",
+                        "conflict_id": atom_id,
+                        "conflict_content": atom.content,
+                        "reason": f"Contradicting terms: '{pos}' vs '{neg}'"
+                    }
+            
+            # Check 2: Mutually exclusive technologies
+            for exclusive_set in self.MUTUALLY_EXCLUSIVE:
+                content_matches = [t for t in exclusive_set if t in content_lower]
+                existing_matches = [t for t in exclusive_set if t in existing_lower]
+                
+                if content_matches and existing_matches:
+                    if set(content_matches) != set(existing_matches):
+                        return {
+                            "type": "mutual_exclusion",
+                            "conflict_id": atom_id,
+                            "conflict_content": atom.content,
+                            "reason": f"Mutually exclusive: {content_matches} vs {existing_matches}"
+                        }
+        
+        return None
+
+    # --------------------------------------------------------------------------
+    # P3: AUTO-IMPORTANCE DETECTION
+    # --------------------------------------------------------------------------
+    IMPORTANCE_PATTERNS = {
+        10: ["my name is", "i am called", "i'm called", "call me"],  # Identity = pinned
+        9: ["always use", "never use", "must use", "must never"],  # Strong rules
+        8: ["i prefer", "i like", "i want", "i need"],  # Preferences
+        7: ["we decided", "we chose", "project uses", "using"],  # Decisions
+        6: ["remember that", "note that", "keep in mind"],  # Explicit memory
+    }
+
+    def _auto_detect_importance(self, content: str, scope_type: str) -> int:
+        """
+        Auto-detect importance based on content.
+        Returns importance score 1-10.
+        """
+        # Global scope items get a boost
+        base_importance = 5
+        if scope_type == "global":
+            base_importance = 7
+        
+        content_lower = content.lower()
+        
+        for importance, patterns in self.IMPORTANCE_PATTERNS.items():
+            for pattern in patterns:
+                if pattern in content_lower:
+                    return max(importance, base_importance)
+        
+        return base_importance
 
     def ingest(self, content: str, embedding: List[float], intent_mask: int, 
                scope_hash: str, refs: List[str] = None, ttl: int = None, 
-               confidence: float = 1.0, force_global: bool = False):
+               confidence: float = 1.0, force_global: bool = False,
+               check_duplicates: bool = True, check_conflicts: bool = True):
         """
-        Ingest a new memory atom.
+        Ingest a new memory atom with deduplication and conflict detection.
         
         Args:
             force_global: If True, always store in global scope
+            check_duplicates: If True, check for and skip duplicates (P0)
+            check_conflicts: If True, detect and warn about conflicts (P2)
+        
+        Returns:
+            Dict with 'id' (atom_id), 'duplicate' (bool), 'conflict' (optional info)
         """
         # Binary Quantization (Float -> Packed Bits)
         vec = np.array(embedding, dtype=np.float32)
@@ -424,10 +576,38 @@ class DeltaMem:
             effective_scope = scope_hash
             scope_type = ScopeManager.get_scope_type(scope_hash)
         
+        result = {"id": None, "duplicate": False, "conflict": None}
+        
+        # P0: Deduplication check
+        if check_duplicates:
+            existing_id = self._check_duplicate(packed, effective_scope)
+            if existing_id:
+                # Update access stats on the existing memory instead of creating duplicate
+                self.db.update_access_stats([existing_id], int(time.time()))
+                result["id"] = existing_id
+                result["duplicate"] = True
+                return result
+        
+        # P2: Conflict detection
+        if check_conflicts:
+            conflict = self._detect_conflict(content, packed, effective_scope)
+            if conflict:
+                result["conflict"] = conflict
+                # Auto-add ref to conflicting atom for traceability
+                if refs is None:
+                    refs = []
+                if conflict["conflict_id"] not in refs:
+                    refs.append(conflict["conflict_id"])
+                # Lower confidence for conflicting entries
+                confidence = min(confidence, 0.7)
+        
         # Generate unique ID
         atom_id = f"{int(time.time()*1000)}_{abs(hash(content))}_{random.randint(0, 9999)}"
         if refs is None:
             refs = []
+        
+        # P3: Auto-detect importance
+        importance = self._auto_detect_importance(content, scope_type)
         
         current_time = int(time.time())
         atom = MemoryAtom(
@@ -443,19 +623,28 @@ class DeltaMem:
             original_dim=len(embedding),
             access_count=0,
             last_accessed=current_time,
-            scope_type=scope_type
+            scope_type=scope_type,
+            importance=importance
         )
         self.db.add_atom(atom)
         
         # Update in-memory index
         self.index.add(atom)
         
-        return atom.id
+        result["id"] = atom.id
+        return result
 
     def search(self, query_emb: List[float], intent_mask: int, scope_hash: str = None, top_k: int = 10, use_spreading_activation: bool = True, query_text: str = None):
         """
         Hybrid Search: Vector + FTS using Reciprocal Rank Fusion (RRF).
         """
+        # Hot-reload: Check if DB file changed since last load
+        if os.path.exists(self.db_path):
+            mtime = os.path.getmtime(self.db_path)
+            if mtime > self.idx_mtime:
+                # Reload index from disk
+                self._hydrate_index()
+                
         current_time = int(time.time())
         k_const = 60 # RRF constant
         
@@ -541,31 +730,54 @@ class DeltaMem:
             fused_scores[atom_id]["score"] += 1.0 / (k_const + rank + 1)
             fused_scores[atom_id]["sources"].append("fts")
 
-        # 4. Spreading Activation (Applied to fused heads)
+        # 4. Spreading Activation (P1: Multi-hop with exponential decay)
         final_candidates = fused_scores
         if use_spreading_activation:
              # Take top items from fusion to spread from
              sorted_heads = sorted(fused_scores.values(), key=lambda x: x["score"], reverse=True)[:top_k]
              
-             for item in sorted_heads:
-                 atom = item["atom"]
-                 base_score = item["score"]
+             # Multi-hop spreading activation (P1 improvement)
+             def spread_recursively(atom_id: str, activation: float, depth: int = 0, max_depth: int = 2, visited: set = None):
+                 """Recursively spread activation through refs with exponential decay."""
+                 if visited is None:
+                     visited = set()
+                 if depth >= max_depth or activation < 0.01 or atom_id in visited:
+                     return
+                 
+                 visited.add(atom_id)
+                 atom = self.index.atoms_map.get(atom_id)
+                 if not atom:
+                     return
                  
                  for ref_id in atom.refs:
                      parent = self.index.atoms_map.get(ref_id)
-                     if parent and (parent.ttl is None or parent.ttl > current_time):
-                         activation = base_score * self.SPREADING_DECAY
-                         
-                         if ref_id in final_candidates:
-                             final_candidates[ref_id]["score"] += activation
-                             if "spread" not in final_candidates[ref_id]["sources"]:
-                                 final_candidates[ref_id]["sources"].append("spread")
-                         else:
-                             final_candidates[ref_id] = {
-                                 "score": activation,
-                                 "atom": parent,
-                                 "sources": ["spread"]
-                             }
+                     if not parent:
+                         continue
+                     if parent.ttl is not None and parent.ttl <= current_time:
+                         continue
+                     
+                     # Decay activation with each hop
+                     ref_activation = activation * self.SPREADING_DECAY
+                     
+                     if ref_id in final_candidates:
+                         final_candidates[ref_id]["score"] += ref_activation
+                         if "spread" not in final_candidates[ref_id]["sources"]:
+                             final_candidates[ref_id]["sources"].append("spread")
+                     else:
+                         final_candidates[ref_id] = {
+                             "score": ref_activation,
+                             "atom": parent,
+                             "sources": ["spread"]
+                         }
+                     
+                     # Recurse to next hop
+                     spread_recursively(ref_id, ref_activation, depth + 1, max_depth, visited)
+             
+             # Start spreading from each top result
+             for item in sorted_heads:
+                 atom = item["atom"]
+                 base_score = item["score"]
+                 spread_recursively(atom.id, base_score, depth=0, max_depth=2, visited=set())
 
         # Format Output
         results = []
@@ -1058,9 +1270,10 @@ class DeltaMem:
         }
 
     def ingest_global(self, content: str, embedding: List[float], intent_mask: int,
-                     refs: List[str] = None, ttl: int = None, confidence: float = 1.0) -> str:
+                     refs: List[str] = None, ttl: int = None, confidence: float = 1.0) -> Dict[str, Any]:
         """
         Explicitly ingest to global scope (user preferences, style rules).
+        Returns dict with id, duplicate status, and conflict info.
         """
         return self.ingest(
             content=content,
@@ -1070,7 +1283,9 @@ class DeltaMem:
             refs=refs,
             ttl=ttl,
             confidence=confidence,
-            force_global=True
+            force_global=True,
+            check_duplicates=True,
+            check_conflicts=True
         )
 
     # --------------------------------------------------------------------------

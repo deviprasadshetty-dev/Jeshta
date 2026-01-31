@@ -31,18 +31,44 @@ class MCPServer:
         }
         
         # Initialize Embedder (Optional)
+        # IMPORTANT: Redirect stdout during fastembed init to prevent pollution of JSON-RPC channel
         self.embedder = None
         try:
             from fastembed import TextEmbedding
+            import io
+            
             # Use a lightweight, high-performance model. 
             # BAAI/bge-small-en-v1.5 is excellent (384 dim).
             logging.info("Initializing FastEmbed (BAAI/bge-small-en-v1.5)...")
-            self.embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+            
+            # Redirect stdout to prevent fastembed progress bars from polluting JSON-RPC
+            original_stdout = sys.stdout
+            sys.stdout = io.StringIO()
+            try:
+                self.embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+            finally:
+                sys.stdout = original_stdout
+            
             logging.info("FastEmbed initialized.")
         except ImportError:
             logging.warning("fastembed not installed. Auto-embedding disabled.")
+            with open("startup_error.log", "w") as f:
+                f.write("ImportError: fastembed not installed\n")
         except Exception as e:
             logging.error(f"Failed to load fastembed: {e}")
+            with open("startup_error.log", "w") as f:
+                f.write(f"Exception: {e}\n{traceback.format_exc()}\n")
+
+    def _safe_embed(self, texts: list) -> list:
+        """Generate embeddings with stdout redirected to prevent JSON-RPC pollution."""
+        import io
+        original_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            embeddings = list(self.embedder.embed(texts))
+            return [e.tolist() for e in embeddings]
+        finally:
+            sys.stdout = original_stdout
 
     def add_atom(self, args: Dict[str, Any]) -> str:
         # Args: content, embedding, intent_mask, scope_hash, refs?, ttl?, confidence?
@@ -63,16 +89,15 @@ class MCPServer:
         if embedding is None:
             if self.embedder:
                 try:
-                    # Generate embedding - fastembed expects a list of strings
-                    embeddings = list(self.embedder.embed([content]))
-                    embedding = embeddings[0].tolist()
+                    # Generate embedding using safe wrapper
+                    embedding = self._safe_embed([content])[0]
                 except Exception as e:
                     logging.error(f"Embedding error: {e}")
                     raise ValueError(f"Failed to generate embedding: {e}")
             else:
                 raise ValueError("Missing field: embedding (and no local embedder available)")
         
-        return self.mem.ingest(
+        result = self.mem.ingest(
             content=content,
             embedding=embedding,
             intent_mask=args["intent_mask"],
@@ -81,6 +106,19 @@ class MCPServer:
             ttl=args.get("ttl"),
             confidence=args.get("confidence", 1.0)
         )
+        
+        # Handle new return format with deduplication and conflict info
+        response = {"id": result["id"]}
+        
+        if result.get("duplicate"):
+            response["note"] = "Duplicate detected - updated existing memory instead"
+        
+        if result.get("conflict"):
+            conflict = result["conflict"]
+            response["warning"] = f"Conflict detected with existing memory: {conflict.get('conflict_content', '')} - Reason: {conflict.get('reason', 'unknown')}"
+            response["conflict_with"] = conflict.get("conflict_id")
+        
+        return response
 
     def search_atoms(self, args: Dict[str, Any]) -> Any:
         """
@@ -89,7 +127,7 @@ class MCPServer:
         """
         if "embedding" not in args and "query" in args:
             if self.embedder:
-                args["embedding"] = list(self.embedder.embed([args["query"]]))[0].tolist()
+                args["embedding"] = self._safe_embed([args["query"]])[0]
             else:
                 raise ValueError("Missing field: embedding (and no local embedder to process 'query')")
 
@@ -166,11 +204,11 @@ class MCPServer:
         embedding = args.get("embedding")
         if embedding is None:
             if self.embedder:
-                embedding = list(self.embedder.embed([args["content"]]))[0].tolist()
+                embedding = self._safe_embed([args["content"]])[0]
             else:
                 raise ValueError("Missing field: embedding (and no local embedder available)")
         
-        return self.mem.ingest_global(
+        result = self.mem.ingest_global(
             content=args["content"],
             embedding=embedding,
             intent_mask=args["intent_mask"],
@@ -178,12 +216,21 @@ class MCPServer:
             ttl=args.get("ttl"),
             confidence=args.get("confidence", 1.0)
         )
+        
+        response = {"id": result["id"]}
+        if result.get("duplicate"):
+            response["note"] = "Duplicate detected - updated existing memory"
+        if result.get("conflict"):
+            c = result["conflict"]
+            response["warning"] = f"Conflict: {c.get('reason')} with '{c.get('conflict_content')}'"
+            
+        return response
 
     def search_hierarchical(self, args: Dict[str, Any]) -> Any:
         """Search across project + global scope with priority weighting."""
         if "embedding" not in args and "query" in args:
             if self.embedder:
-                args["embedding"] = list(self.embedder.embed([args["query"]]))[0].tolist()
+                args["embedding"] = self._safe_embed([args["query"]])[0]
             else:
                 raise ValueError("Missing field: embedding (and no local embedder to process 'query')")
 
