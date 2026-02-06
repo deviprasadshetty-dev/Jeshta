@@ -1,8 +1,8 @@
-# 🧠 JESHTA MEMORY PROTOCOL — MANDATORY
+# 🧠 JESHTA MEMORY — APSM COGNITIVE ENGINE
 
 > [!CAUTION]
 > **FAILURE TO USE JESHTA = MEMORY LOSS**
-> Without this, you forget everything between sessions. The user will have to repeat themselves constantly. USE IT.
+> Without this, you forget everything between sessions. USE IT.
 
 ---
 
@@ -13,106 +13,132 @@
 mcp_Jeshta_compile_context()
 ```
 
-This loads your memory. If you skip this, you're starting with amnesia.
-
-**What you get:**
-- `stable_facts` — Things you know (user's name, preferences, tech stack)
-- `active_constraints` — Rules to follow (coding style, forbidden patterns)
-- `recent_deltas` — Recent changes (decisions that supersede old ones)
+This loads your cognitive state: `stable_facts`, `active_constraints`, `recent_episodes`, `status`.
 
 ---
 
-## 🎯 TRIGGER WORDS — AUTO-SAVE REQUIRED
+## 🧬 APSM TRI-LAYER MEMORY
 
-When the user says ANY of these, you **MUST** call `add_atom`:
+### Layer 1: Episodic (Experience Traces)
+Store raw experiences with context, action, observation, outcome.
 
-| User says... | Action | Intent Mask |
-|--------------|--------|-------------|
-| "I prefer...", "I like...", "I always...", "I never..." | Save preference | 4 (Constraint) |
-| "Let's use...", "We'll go with...", "I've decided..." | Save decision | 1 (Fact) |
-| "Actually...", "Change it to...", "Switch to..." | Save delta with ref | 2 (Delta) |
-| "Remember that...", "Note that...", "Keep in mind..." | Save explicitly | 1 (Fact) |
-| "My name is...", "I'm called...", "I work at..." | Save to GLOBAL | 1 (Fact) |
-| "Don't ever...", "Never use...", "Always avoid..." | Save constraint | 4 (Constraint) |
-
-### Example: User says "I prefer using TypeScript"
-```
-mcp_Jeshta_add_atom(
-    content="User prefers TypeScript over JavaScript",
-    intent_mask=4
+```python
+mcp_Jeshta_log_episode(
+    action="Fixed authentication bug",
+    context={"file": "auth.py", "error": "token expired"},
+    observation="Token refresh was missing",
+    outcome={"success": True, "solution": "Added refresh logic"},
+    surprise_score=0.7  # High = memorable
 )
 ```
-**Response:** "Got it, I'll remember you prefer TypeScript ✓"
+
+### Layer 2: Semantic Graph (Knowledge)
+Store facts and relationships as a knowledge graph.
+
+```python
+# Add a fact triple
+mcp_Jeshta_add_fact(
+    subject="User", 
+    relation="prefers", 
+    object="TypeScript"
+)
+
+# Or use legacy add_atom for simple facts
+mcp_Jeshta_add_atom(
+    content="User prefers TypeScript over JavaScript",
+    intent_mask=4  # 1=Fact, 2=Delta, 4=Constraint
+)
+```
+
+### Layer 3: Procedural (Skills)
+Store reusable code/skills that can be executed.
+
+```python
+mcp_Jeshta_add_skill(
+    name="format_code",
+    description="Format Python code",
+    code="result = code.strip().replace('\\t', '    ')",
+    parameters=[{"name": "code", "type": "str"}]
+)
+
+# Execute later
+mcp_Jeshta_execute_skill(name="format_code", args={"code": "def foo():\n\treturn 1"})
+```
 
 ---
 
-## 🔍 WHEN TO SEARCH MEMORY
+## 🎯 TRIGGER WORDS — AUTO-SAVE
 
-**BEFORE answering questions about:**
-- Past decisions → `search_atoms(query="decision about X")`
-- User preferences → `search_atoms(query="user preferences")`
-- Project setup → `search_atoms(query="tech stack")`
-- Previous work → `search_atoms(query="what we did")`
+| User says... | Action | Tool |
+|--------------|--------|------|
+| "I prefer...", "I always...", "I never..." | Save constraint | `add_atom(content, intent_mask=4)` |
+| "Let's use...", "We decided..." | Save fact | `add_atom(content, intent_mask=1)` |
+| "Actually...", "Change to..." | Save delta with ref | `add_atom(content, intent_mask=2, refs=[old_id])` |
+| "Remember..." | Save fact | `add_atom(content, intent_mask=1)` |
+| Debugging/fixing something | Log experience | `log_episode(action, context, outcome)` |
+| "X is related to Y" | Add relationship | `add_fact(subject, relation, object)` |
 
-### Example: User asks "What database are we using?"
-```
+**Always confirm:** "Got it, I'll remember that ✓"
+
+---
+
+## 🔍 SEARCH BEFORE ANSWERING
+
+```python
+# Search graph for facts/decisions
 mcp_Jeshta_search_atoms(query="database decision")
+
+# Query knowledge graph with Cypher-like syntax
+mcp_Jeshta_query_graph(query="MATCH (n:fact) RETURN n")
+
+# Recall past experiences
+mcp_Jeshta_recall_episodes(query="authentication", limit=10)
 ```
-Then answer based on results.
 
 ---
 
 ## 📖 TOOL QUICK REFERENCE
 
-| Tool | When | Required Args |
-|------|------|---------------|
-| `compile_context()` | **FIRST thing every session** | None |
-| `add_atom(content, intent_mask)` | User states preference/decision | content, intent_mask |
-| `search_atoms(query)` | Before answering historical questions | query |
-| `delete_atom(atom_id)` | User says "forget X" | atom_id |
+| Tool | Purpose | Required |
+|------|---------|----------|
+| `compile_context()` | **START OF EVERY SESSION** | - |
+| `add_atom(content, intent_mask)` | Save fact/delta/constraint | content, intent_mask |
+| `add_fact(subject, relation, object)` | Add graph triple | subject, relation, object |
+| `log_episode(action, ...)` | Log experience | action |
+| `search_atoms(query)` | Search knowledge | query |
+| `recall_episodes(query)` | Search experiences | query |
+| `execute_skill(name, args)` | Run stored skill | name |
+| `consolidate()` | Pattern→Skill (on-demand) | - |
+| `apsm_status()` | Check memory health | - |
 
-### Intent Masks (MEMORIZE THIS)
-- `1` = Fact (tech stack, project info)
-- `2` = Delta (changes, supersedes old info)
-- `4` = Constraint (preferences, rules, always/never)
-
----
-
-## ⚠️ COMMON MISTAKES TO AVOID
-
-1. **Forgetting to call compile_context** → You start each session with no memory
-2. **Not saving preferences** → User has to repeat themselves
-3. **Not searching before answering** → You give wrong/outdated answers
-4. **Overwriting without refs** → You lose the chain of decisions
+### Intent Masks
+- `1` = **Fact** (tech stack, project info)
+- `2` = **Delta** (changes, supersedes old info)
+- `4` = **Constraint** (preferences, rules)
 
 ---
 
-## 🔗 LINKING CHANGES (IMPORTANT)
+## 🔗 LINKING CHANGES
 
-When a decision **changes**, link to the old one:
+When something **changes**, link to old decision:
 
 ```python
-# User previously said: "Use SQLite" (atom_id: "abc123")
-# Now says: "Actually, let's use PostgreSQL"
-
 mcp_Jeshta_add_atom(
-    content="Switched from SQLite to PostgreSQL for scalability",
-    intent_mask=2,  # Delta = change
-    refs=["abc123"]  # Link to old decision
+    content="Switched from SQLite to PostgreSQL",
+    intent_mask=2,
+    refs=["old_atom_id"]
 )
 ```
 
-This preserves history and context.
+---
+
+## ✅ SELF-CHECK
+
+1. Did I call `compile_context()` this session? **If no → call NOW**
+2. User shared preference I haven't saved? **Save it**
+3. Answering historical question? **Search first**
+4. Fixed a tricky bug? **Log episode for future reference**
 
 ---
 
-## ✅ SELF-CHECK QUESTIONS
-
-Ask yourself:
-1. Did I call `compile_context()` this session? **If no → call it NOW**
-2. Did the user share a preference I haven't saved? **If yes → save it**
-3. Am I answering a question about the past without searching? **If yes → search first**
-
----
-
-**THE GOLDEN RULE: When in doubt, SAVE IT. It's better to have a memory you don't need than to forget something important.**
+**GOLDEN RULE: When in doubt, SAVE IT.**
